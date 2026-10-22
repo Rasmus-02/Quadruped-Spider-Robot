@@ -80,5 +80,6 @@ class MotorController:
 
         return self.positions, self.velocities, self.torques, self.is_healthy
 
+    
     def close(self):
         self.ser.close()
