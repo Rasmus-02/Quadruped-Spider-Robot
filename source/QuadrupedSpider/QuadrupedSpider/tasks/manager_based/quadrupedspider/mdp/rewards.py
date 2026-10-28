@@ -25,3 +25,16 @@ def joint_pos_target_l2(env: ManagerBasedRLEnv, target: float, asset_cfg: SceneE
     joint_pos = wrap_to_pi(asset.data.joint_pos[:, asset_cfg.joint_ids])
     # compute the reward
     return torch.sum(torch.square(joint_pos - target), dim=1)
+
+
+def joint_effort_above_continuous_limit(
+    env: ManagerBasedRLEnv, limit: float, asset_cfg: SceneEntityCfg
+) -> torch.Tensor:
+    """Penalize joint efforts that exceed a specified continuous limit."""
+    asset = env.scene[asset_cfg.name]
+    
+    # Change 'applied_effort' to 'applied_torque'
+    efforts = torch.abs(asset.data.applied_torque)
+    
+    excess = torch.clamp(efforts - limit, min=0.0)
+    return torch.sum(torch.square(excess), dim=-1)

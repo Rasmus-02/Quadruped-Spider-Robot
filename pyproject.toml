@@ -45,6 +45,21 @@ ignore = [
     "UP018",  # Unnecessary `float` call (rewrite as a literal)
 ]
 
+[build-system]
+requires = ["setuptools>=64.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "QuadrupedSpider"
+version = "0.0.1"
+description = "Quadruped Spider Isaac Lab extension"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["source"]
+
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]  # Allow unused imports in __init__.py files
 
