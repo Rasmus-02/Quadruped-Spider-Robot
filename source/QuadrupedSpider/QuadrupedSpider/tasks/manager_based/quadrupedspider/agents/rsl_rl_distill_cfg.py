@@ -25,7 +25,7 @@ class QuadrupedSpiderDistillRunnerCfg(RslRlBaseRunnerCfg):
     @configclass
     class AlgorithmCfg:
         class_name = "Distillation"
-        learning_rate = 1e-3
+        learning_rate = 5e-4
         num_learning_epochs = 5
         max_grad_norm = 1.0
 
