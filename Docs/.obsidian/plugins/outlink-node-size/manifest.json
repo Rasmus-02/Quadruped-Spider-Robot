@@ -1,0 +1,10 @@
+{
+	"id": "outlink-node-size",
+	"name": "Outlink Node Size",
+	"version": "1.0.4",
+	"minAppVersion": "1.4.0",
+	"description": "Size graph view nodes by the combined size of the notes they link to. The inverse of backlink importance: notes that link to big notes grow, and notes that link to nothing stay small.",
+	"author": "Gonçalo Mendonça Cartaxana",
+	"authorUrl": "https://github.com/goncasCartaxana",
+	"isDesktopOnly": false
+}

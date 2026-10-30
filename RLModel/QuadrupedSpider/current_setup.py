@@ -1,0 +1,1946 @@
+==> source/QuadrupedSpider/setup.py <==
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""Installation script for the 'QuadrupedSpider' python package."""
+
+import os
+
+import toml
+from setuptools import setup
+
+# Obtain the extension data from the extension.toml file
+EXTENSION_PATH = os.path.dirname(os.path.realpath(__file__))
+# Read the extension.toml file
+EXTENSION_TOML_DATA = toml.load(os.path.join(EXTENSION_PATH, "config", "extension.toml"))
+
+# Minimum dependencies required prior to installation
+INSTALL_REQUIRES = [
+    # NOTE: Add dependencies
+    "psutil",
+]
+
+# Installation operation
+setup(
+    name="QuadrupedSpider",
+    packages=["QuadrupedSpider"],
+    author=EXTENSION_TOML_DATA["package"]["author"],
+    maintainer=EXTENSION_TOML_DATA["package"]["maintainer"],
+    url=EXTENSION_TOML_DATA["package"]["repository"],
+    version=EXTENSION_TOML_DATA["package"]["version"],
+    description=EXTENSION_TOML_DATA["package"]["description"],
+    keywords=EXTENSION_TOML_DATA["package"]["keywords"],
+    install_requires=INSTALL_REQUIRES,
+    license="Apache-2.0",
+    include_package_data=True,
+    python_requires=">=3.10",
+    classifiers=[
+        "Natural Language :: English",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Isaac Sim :: 4.5.0",
+        "Isaac Sim :: 5.0.0",
+        "Isaac Sim :: 5.1.0",
+    ],
+    zip_safe=False,
+)
+==> source/QuadrupedSpider/QuadrupedSpider/tasks/manager_based/quadrupedspider/quadrupedspider_base_env_cfg.py <==
+# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+import math
+
+from isaaclab.terrains import TerrainImporterCfg
+from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
+from isaaclab.sensors import RayCasterCfg, patterns
+import isaaclab.sim as sim_utils
+from isaaclab.actuators import ImplicitActuatorCfg
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg
+from isaaclab.envs import ManagerBasedRLEnvCfg, mdp
+from isaaclab.envs.mdp import UniformVelocityCommandCfg
+from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import ObservationGroupCfg as ObsGroup
+from isaaclab.managers import ObservationTermCfg as ObsTerm
+from isaaclab.managers import RewardTermCfg as RewTerm
+from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import TerminationTermCfg as DoneTerm
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.utils import configclass
+
+from . import mdp as custom_mdp
+
+# =====================================================================================
+# Robot definition
+# =====================================================================================
+
+QUADRUPED_SPIDER_BASE_CFG = ArticulationCfg(
+    spawn=sim_utils.UsdFileCfg(
+        usd_path="/home/rasmus/Robotics/MastersThesis/RLModel/QuadrupedSpider.usd",
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            rigid_body_enabled=True,
+            max_linear_velocity=1000.0,
+            max_angular_velocity=1000.0,
+            max_depenetration_velocity=10.0,
+            enable_gyroscopic_forces=True,
+        ),
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=False,
+            solver_position_iteration_count=4,
+            solver_velocity_iteration_count=2,
+        ),
+    ),
+    init_state=ArticulationCfg.InitialStateCfg(
+        pos=(0.0, 0.0, 0.35),
+        rot=(1.0, 0.0, 0.0, 0.0),
+        joint_pos={
+            # Diagonal yaw setup (+-45 degrees)
+            "FRYawMotor": 0.7854,
+            "RLYawMotor": 0.7854,
+            "FLYawMotor": -0.7854,
+            "RRYawMotor": -0.7854,
+
+            # Hip pitch (angles thighs downward)
+            ".*HipMotor": 0.35,
+
+            # Knee bend (places feet firmly into the ground plane)
+            ".*KneeMotor": -0.55,
+        },
+    ),
+    actuators={
+        "legs": ImplicitActuatorCfg(
+            joint_names_expr=[".*Motor"],
+            effort_limit_sim=14.0,
+            velocity_limit_sim=1890.0,
+            stiffness=25.0,
+            damping=1.2,
+        ),
+    },
+)
+
+
+# =====================================================================================
+# Scene definition
+# =====================================================================================
+
+
+@configclass
+class QuadrupedspiderSceneCfg(InteractiveSceneCfg):
+    """Configuration for the quadruped spider robot scene."""
+
+    # Procedural Rough Terrain (replaces GroundPlaneCfg)
+    terrain = TerrainImporterCfg(
+        prim_path="/World/ground",
+        terrain_type="generator",
+        terrain_generator=ROUGH_TERRAINS_CFG,
+        max_init_terrain_level=5,
+        collision_group=-1,
+    )
+
+    # Robot articulation
+    robot: ArticulationCfg = QUADRUPED_SPIDER_BASE_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+
+    # LiDAR RayCaster sensor to scan the ground
+    height_scanner = RayCasterCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/base_link",
+        offset=RayCasterCfg.OffsetCfg(pos=(-0.1, 0.0, 0.0)),
+        ray_alignment="yaw",
+        pattern_cfg=patterns.GridPatternCfg(size=(1.3, 1.3), resolution=0.13),
+        debug_vis=False,
+        mesh_prim_paths=["/World/ground"],
+    )
+
+    tof_sensor = RayCasterCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/base_link",
+        offset=RayCasterCfg.OffsetCfg(pos=(-0.1, 0.0, 0.0)),
+        ray_alignment="world",
+        pattern_cfg=patterns.GridPatternCfg(size=(0.0, 0.0), resolution=1.0),
+        debug_vis=True,
+        mesh_prim_paths=["/World/ground"],  # Bypasses the robot collision meshes
+    )
+
+    # Ambient lighting
+    dome_light = AssetBaseCfg(
+        prim_path="/World/DomeLight",
+        spawn=sim_utils.DomeLightCfg(color=(0.9, 0.9, 0.9), intensity=500.0),
+    )
+
+# =====================================================================================
+# MDP settings
+# =====================================================================================
+
+
+@configclass
+class ActionsCfg:
+    """Action specifications for the MDP."""
+
+    joint_pos = mdp.JointPositionActionCfg(
+        asset_name="robot",
+        joint_names=[".*Motor"],
+        scale=0.25,
+        use_default_offset=True,
+    )
+
+
+@configclass
+class ObservationsCfg:
+    """Observation specifications for the MDP."""
+
+    @configclass
+    class PolicyCfg(ObsGroup):
+        """Observations for policy group."""
+
+        # IMU observations
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.25)
+        projected_gravity = ObsTerm(func=mdp.projected_gravity)
+
+        # Target command from command manager
+        velocity_commands = ObsTerm(
+            func=mdp.generated_commands,
+            params={"command_name": "base_velocity"},
+        )
+
+        # Joint relative positions and velocities
+        joint_pos = ObsTerm(func=mdp.joint_pos_rel)
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05)
+
+        # Action history for smooth transitions
+        actions = ObsTerm(func=mdp.last_action)
+
+        def __post_init__(self) -> None:
+            self.enable_corruption = False
+            self.concatenate_terms = True
+
+    policy: PolicyCfg = PolicyCfg()
+
+
+@configclass
+class EventCfg:
+    """Configuration for events."""
+
+    # Reset root base (pose and orientation)
+    reset_base = EventTerm(
+        func=mdp.reset_root_state_uniform,
+        mode="reset",
+        params={
+            "pose_range": {"x": (-0.1, 0.1), "y": (-0.1, 0.1), "yaw": (-3.14, 3.14)},
+            "velocity_range": {},
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+
+    # Reset joint positions with slight initial offset
+    reset_robot_joints = EventTerm(
+        func=mdp.reset_joints_by_offset,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=[".*Motor"]),
+            "position_range": (-0.05, 0.05),
+            "velocity_range": (0.0, 0.0),
+        },
+    )
+
+
+@configclass
+class CommandsCfg:
+    """Command specifications for the MDP."""
+
+    base_velocity = UniformVelocityCommandCfg(
+        asset_name="robot",
+        resampling_time_range=(2.5, 5.0),
+        rel_standing_envs=0.1,
+        rel_heading_envs=0.0,
+        heading_command=False,
+        debug_vis=True,
+        ranges=UniformVelocityCommandCfg.Ranges(
+            lin_vel_x=(-1.0, 1.0),
+            lin_vel_y=(-1.0, 1.0),
+            ang_vel_z=(-1.0, 1.0),
+        ),
+    )
+
+
+@configclass
+class RewardsCfg:
+    """Reward terms for the MDP."""
+
+    # Survival status
+    alive = RewTerm(func=mdp.is_alive, weight=1.0)
+    terminating = RewTerm(func=mdp.is_terminated, weight=-3.0)
+
+    # Velocity trackinhg
+    track_lin_vel_xy_exp = RewTerm(
+        func=mdp.track_lin_vel_xy_exp,
+        weight=5.0,
+        params={"command_name": "base_velocity", "std": 0.35, "asset_cfg": SceneEntityCfg("robot")},
+    )
+    track_ang_vel_z_exp = RewTerm(
+        func=mdp.track_ang_vel_z_exp,
+        weight=2.5,
+        params={"command_name": "base_velocity", "std": 0.35, "asset_cfg": SceneEntityCfg("robot")},
+    )
+
+    ## Posture and stability
+    # ========================================================
+    # Z axis movement
+    lin_vel_z_l2 = RewTerm(
+        func=mdp.lin_vel_z_l2,
+        weight=-0.05,
+        params={"asset_cfg": SceneEntityCfg("robot")},
+    )
+    # Large action commands
+    action_l2 = RewTerm(
+        func=mdp.action_l2, 
+        weight=-0.015
+    )
+    # Penalize joints exceeding the 5 Nm continuous rating
+    continuous_torque_limit = RewTerm(
+        func=custom_mdp.joint_effort_above_continuous_limit,
+        weight=-0.005,
+        params={"limit": 5.0, "asset_cfg": SceneEntityCfg("robot")}
+    )
+    # Penalize joint torque
+    joint_torques_l2 = RewTerm(
+        func=mdp.joint_torques_l2,
+        weight=-0.00002,
+        params={"asset_cfg": SceneEntityCfg("robot")}
+    )
+    # Penalize joints getting too close to their physical limits
+    joint_limits = RewTerm(
+        func=mdp.joint_pos_limits,
+        weight=-0.1,
+        params={"asset_cfg": SceneEntityCfg("robot")}
+    )
+    # IMU Gyro penalty: Penalize roll and pitch rotation rates
+    ang_vel_xy_l2 = RewTerm(
+        func=mdp.ang_vel_xy_l2,
+        weight=-0.02,
+        params={"asset_cfg": SceneEntityCfg("robot")},
+    )
+    flat_orientation = RewTerm(
+        func=mdp.flat_orientation_l2,
+        weight=-1.0,
+        params={"asset_cfg": SceneEntityCfg("robot")},
+    )    
+    # Smoothness regularization (Prevents jittery movement)
+    action_rate = RewTerm(
+        func=mdp.action_rate_l2,
+        weight=-0.04,
+    )
+
+
+@configclass
+class TerminationsCfg:
+    """Termination terms for the MDP."""
+
+    # Episode timeout
+    time_out = DoneTerm(func=mdp.time_out, time_out=True)
+
+    # Drop termination
+    base_height = DoneTerm(
+        func=custom_mdp.tof_distance_below_minimum,  # Point this to your new function
+        params={"minimum_distance": 0.18, "sensor_cfg": SceneEntityCfg("tof_sensor")},
+    )
+
+    # Roll/pitch threshold termination
+    bad_orientation = DoneTerm(
+        func=mdp.bad_orientation,
+        params={"limit_angle": math.pi / 2, "asset_cfg": SceneEntityCfg("robot")},
+    )
+
+
+# =====================================================================================
+# Environment configuration
+# =====================================================================================
+
+
+@configclass
+class QuadrupedspiderEnvCfg(ManagerBasedRLEnvCfg):
+    # Scene settings
+    scene: QuadrupedspiderSceneCfg = QuadrupedspiderSceneCfg(num_envs=4096, env_spacing=4.0)
+
+    # Sub-manager settings
+    observations: ObservationsCfg = ObservationsCfg()
+    actions: ActionsCfg = ActionsCfg()
+    commands: CommandsCfg = CommandsCfg()
+    events: EventCfg = EventCfg()
+
+    # MDP reward and termination settings
+    rewards: RewardsCfg = RewardsCfg()
+    terminations: TerminationsCfg = TerminationsCfg()
+
+    def __post_init__(self) -> None:
+        """Post initialization."""
+        # Timings
+        self.decimation = 4
+        self.episode_length_s = 10.0
+
+        # Viewport camera
+        self.viewer.eye = (2.5, 2.5, 1.8)
+        self.viewer.lookat = (0.0, 0.0, 0.05)
+
+        # Simulation physics stepping (120 Hz PhysX / 30 Hz policy)
+        self.sim.dt = 1 / 120
+        self.sim.render_interval = self.decimation
+==> source/QuadrupedSpider/QuadrupedSpider/tasks/manager_based/quadrupedspider/agents/rsl_rl_distill_cfg.py <==
+from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg
+from isaaclab.utils import configclass
+
+
+@configclass
+class QuadrupedSpiderDistillRunnerCfg(RslRlBaseRunnerCfg):
+    class_name = "DistillationRunner"
+
+    num_steps_per_env = 24
+    max_iterations = 2000
+    save_interval = 50
+    experiment_name = "quadruped_spider_student"
+    empirical_normalization = False
+
+    resume = False
+    load_run = ".*"
+    load_checkpoint = "model_.*.pt"
+
+    obs_groups = {
+        "policy": ["policy"],
+        "teacher": ["teacher"],
+    }
+
+    @configclass
+    class AlgorithmCfg:
+        class_name = "BeliefDistillation"
+        lambda_bc = 1.0
+        lambda_rec = 0.5
+        prop_dim = 45
+        learning_rate = 5e-4
+        num_learning_epochs = 5
+        max_grad_norm = 1.0
+
+    @configclass
+    class PolicyCfg:
+        class_name = "MikiStudentTeacher"
+        prop_dim = 45
+        priv_dim = 124
+        latent_dim = 64
+        rnn_hidden_dim = 256
+        rnn_num_layers = 2
+        student_hidden_dims = [512, 256, 128]
+        teacher_hidden_dims = [512, 256, 128]
+        activation = "elu"
+
+    algorithm = AlgorithmCfg()
+    policy = PolicyCfg()
+==> source/QuadrupedSpider/QuadrupedSpider/tasks/manager_based/quadrupedspider/agents/rsl_rl_ppo_cfg.py <==
+# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+from isaaclab.utils import configclass
+
+from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+
+
+@configclass
+class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    num_steps_per_env = 16
+    max_iterations = 10000
+    save_interval = 50
+    experiment_name = "QuadrupedSpider"
+    policy = RslRlPpoActorCriticCfg(
+        init_noise_std=1.0,
+        actor_obs_normalization=False,
+        critic_obs_normalization=False,
+        actor_hidden_dims=[512, 256, 128],
+        critic_hidden_dims=[512, 256, 128],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.005,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=1.0e-3,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+    )
+==> source/QuadrupedSpider/QuadrupedSpider/tasks/manager_based/quadrupedspider/agents/__init__.py <==
+# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+==> source/QuadrupedSpider/QuadrupedSpider/tasks/manager_based/quadrupedspider/teacher_env_cfg.py <==
+from isaaclab.managers import ObservationGroupCfg as ObsGroup
+from isaaclab.managers import ObservationTermCfg as ObsTerm
+from isaaclab.managers import SceneEntityCfg
+from isaaclab.utils import configclass
+import isaaclab.envs.mdp as mdp
+
+from .quadrupedspider_base_env_cfg import QuadrupedspiderEnvCfg
+
+@configclass
+class TeacherObservationsCfg:
+    @configclass
+    class PolicyCfg(ObsGroup):
+        # Proprioception
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.25)
+        projected_gravity = ObsTerm(func=mdp.projected_gravity)
+        velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
+        joint_pos = ObsTerm(func=mdp.joint_pos_rel)
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05)
+        actions = ObsTerm(func=mdp.last_action)
+
+        # Privileged states (Teacher PPO)
+        base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
+        clean_height_scan = ObsTerm(
+            func=mdp.height_scan,
+            params={"sensor_cfg": SceneEntityCfg("height_scanner")},
+            clip=(-1.0, 1.0),
+        )
+
+        def __post_init__(self) -> None:
+            self.enable_corruption = False
+            self.concatenate_terms = True
+
+    policy: PolicyCfg = PolicyCfg()
+
+@configclass
+class QuadrupedSpiderTeacherEnvCfg(QuadrupedspiderEnvCfg):
+    observations: TeacherObservationsCfg = TeacherObservationsCfg()
+==> source/QuadrupedSpider/QuadrupedSpider/tasks/manager_based/quadrupedspider/mdp/observations.py <==
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers
+# SPDX-License-Identifier: BSD-3-Clause
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+import torch
+
+from isaaclab.managers import SceneEntityCfg
+from isaaclab.sensors import RayCaster
+
+if TYPE_CHECKING:
+    from isaaclab.envs import ManagerBasedRLEnv
+
+
+def corrupted_height_scan(
+    env: ManagerBasedRLEnv, 
+    sensor_cfg: SceneEntityCfg, 
+    noise_std: float = 0.03, 
+    dropout_prob: float = 0.1
+) -> torch.Tensor:
+    """
+    Samples the height scan and applies synthetic noise and dropouts to simulate 
+    real-world elevation mapping inaccuracies.
+    """
+    sensor: RayCaster = env.scene[sensor_cfg.name]
+    
+    # Compute relative Z-heights from the sensor to the ground hits
+    hit_pos_w = sensor.data.ray_hits_w
+    sensor_pos_w = sensor.data.pos_w
+    
+    # Isaac Lab returns large values or zeros for rays that miss. 
+    # We identify valid hits to avoid exploding math.
+    valid_hits = (hit_pos_w[..., 2] != 0.0)
+    
+    heights = torch.zeros_like(hit_pos_w[..., 2])
+    heights[valid_hits] = hit_pos_w[..., 2][valid_hits] - sensor_pos_w[..., 2].unsqueeze(1).expand_as(heights)[valid_hits]
+    
+    # Add Gaussian noise (simulates depth camera jitter and odometry drift)
+    noise = torch.randn_like(heights) * noise_std
+    heights += noise
+    
+    # Add dropouts (simulates occlusions, shadows, and sensor blindness)
+    dropout_mask = torch.rand_like(heights) < dropout_prob
+    heights[dropout_mask] = -1.0  # Assign a fixed penalty value to blind spots
+    
+    # Clip to a normalized range for the neural network
+    return torch.clamp(heights, min=-1.0, max=1.0)
+==> source/QuadrupedSpider/QuadrupedSpider/tasks/manager_based/quadrupedspider/mdp/terminations.py <==
+import torch
+from isaaclab.envs import ManagerBasedRLEnv
+from isaaclab.managers import SceneEntityCfg
+from isaaclab.sensors import RayCaster
+
+
+def tof_distance_below_minimum(
+    env: ManagerBasedRLEnv, minimum_distance: float, sensor_cfg: SceneEntityCfg
+) -> torch.Tensor:
+    """Terminate when the ToF sensor reads below threshold or clips into the ground."""
+    tof: RayCaster = env.scene[sensor_cfg.name]
+    
+    # Extract world positions
+    hit_pos_w = tof.data.ray_hits_w[:, 0, :]
+    sensor_pos_w = tof.data.pos_w
+    
+    # Calculate physical distance from sensor to the hit point
+    distances = torch.norm(sensor_pos_w - hit_pos_w, dim=-1)
+    
+    # In Isaac Lab, a raycast miss defaults to [0.0, 0.0, 0.0]. 
+    # If it misses, it means the sensor clipped under the floor mesh.
+    missed = (hit_pos_w[:, 0] == 0.0) & (hit_pos_w[:, 1] == 0.0) & (hit_pos_w[:, 2] == 0.0)
+    
+    # Terminate if the ground is too close, OR if the belly clipped through the floor
+    return (distances < minimum_distance) | missed
+==> source/QuadrupedSpider/QuadrupedSpider/tasks/manager_based/quadrupedspider/mdp/rewards.py <==
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import torch
+
+from isaaclab.assets import Articulation
+from isaaclab.managers import SceneEntityCfg
+from isaaclab.utils.math import wrap_to_pi
+
+if TYPE_CHECKING:
+    from isaaclab.envs import ManagerBasedRLEnv
+
+
+def joint_pos_target_l2(env: ManagerBasedRLEnv, target: float, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Penalize joint position deviation from a target value."""
+    # extract the used quantities (to enable type-hinting)
+    asset: Articulation = env.scene[asset_cfg.name]
+    # wrap the joint positions to (-pi, pi)
+    joint_pos = wrap_to_pi(asset.data.joint_pos[:, asset_cfg.joint_ids])
+    # compute the reward
+    return torch.sum(torch.square(joint_pos - target), dim=1)
+
+
+def joint_effort_above_continuous_limit(
+    env: ManagerBasedRLEnv, limit: float, asset_cfg: SceneEntityCfg
+) -> torch.Tensor:
+    """Penalize joint efforts that exceed a specified continuous limit."""
+    asset = env.scene[asset_cfg.name]
+    
+    # Change 'applied_effort' to 'applied_torque'
+    efforts = torch.abs(asset.data.applied_torque)
+    
+    excess = torch.clamp(efforts - limit, min=0.0)
+    return torch.sum(torch.square(excess), dim=-1)
+
+==> source/QuadrupedSpider/QuadrupedSpider/tasks/manager_based/quadrupedspider/mdp/__init__.py <==
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""This sub-module contains the functions that are specific to the environment."""
+
+from isaaclab.envs.mdp import *  # noqa: F401, F403
+
+from .rewards import *  # noqa: F401, F403
+from .observations import *
+from .terminations import *
+
+==> source/QuadrupedSpider/QuadrupedSpider/tasks/manager_based/quadrupedspider/__init__.py <==
+# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+import gymnasium as gym
+
+from .teacher_env_cfg import QuadrupedSpiderTeacherEnvCfg
+from .student_env_cfg import QuadrupedSpiderStudentEnvCfg
+
+
+gym.register(
+    id="Isaac-QuadrupedSpider-Teacher-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": QuadrupedSpiderTeacherEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents.rsl_rl_ppo_cfg:PPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-QuadrupedSpider-Student-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": QuadrupedSpiderStudentEnvCfg,
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents.rsl_rl_distill_cfg:QuadrupedSpiderDistillRunnerCfg",
+    },
+)
+==> source/QuadrupedSpider/QuadrupedSpider/tasks/manager_based/quadrupedspider/student_env_cfg.py <==
+from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import ObservationGroupCfg as ObsGroup
+from isaaclab.managers import ObservationTermCfg as ObsTerm
+from isaaclab.managers import SceneEntityCfg
+from isaaclab.utils import configclass
+import isaaclab.envs.mdp as mdp
+
+from .quadrupedspider_base_env_cfg import QuadrupedspiderEnvCfg, EventCfg
+from . import mdp as custom_mdp
+
+
+@configclass
+class StudentObservationsCfg:
+    @configclass
+    class PolicyCfg(ObsGroup):
+        """Student observations: Single-step noisy proprioception + noisy height scan (166 dims).
+        Temporal memory is handled internally by the Student's GRU."""
+        # Noisy Proprioception (45 dims)
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.25, clip=(-100.0, 100.0))
+        projected_gravity = ObsTerm(func=mdp.projected_gravity, clip=(-100.0, 100.0))
+        velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
+        joint_pos = ObsTerm(func=mdp.joint_pos_rel, clip=(-100.0, 100.0))
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05, clip=(-100.0, 100.0))
+        actions = ObsTerm(func=mdp.last_action, clip=(-100.0, 100.0))
+
+        # Noisy Exteroception with dropouts (121 dims)
+        noisy_height_scan = ObsTerm(
+            func=custom_mdp.corrupted_height_scan,
+            params={
+                "sensor_cfg": SceneEntityCfg("height_scanner"),
+                "noise_std": 0.04,
+                "dropout_prob": 0.15,
+            },
+        )
+
+        def __post_init__(self) -> None:
+            self.enable_corruption = True
+            self.concatenate_terms = True
+            self.history_length = 0  # GRU handles temporal state!
+
+    @configclass
+    class TeacherCfg(ObsGroup):
+        """Teacher observations: Clean proprioception (45) + Privileged states (124) = 169 dims."""
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.25, clip=(-100.0, 100.0))
+        projected_gravity = ObsTerm(func=mdp.projected_gravity, clip=(-100.0, 100.0))
+        velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
+        joint_pos = ObsTerm(func=mdp.joint_pos_rel, clip=(-100.0, 100.0))
+        joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05, clip=(-100.0, 100.0))
+        actions = ObsTerm(func=mdp.last_action, clip=(-100.0, 100.0))
+
+        # Privileged states (124 dims total: 3 lin_vel + 121 clean_height_scan)
+        base_lin_vel = ObsTerm(func=mdp.base_lin_vel, clip=(-100.0, 100.0))
+        clean_height_scan = ObsTerm(
+            func=mdp.height_scan,
+            params={"sensor_cfg": SceneEntityCfg("height_scanner")},
+            clip=(-1.0, 1.0),
+        )
+
+        def __post_init__(self) -> None:
+            self.enable_corruption = False
+            self.concatenate_terms = True
+            self.history_length = 0
+
+    policy: PolicyCfg = PolicyCfg()
+    teacher: TeacherCfg = TeacherCfg()
+
+
+@configclass
+class StudentEventCfg(EventCfg):
+    randomize_friction = EventTerm(
+        func=mdp.randomize_rigid_body_material,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "static_friction_range": (0.4, 1.2),
+            "dynamic_friction_range": (0.4, 1.0),
+            "restitution_range": (0.0, 0.1),
+            "num_buckets": 64,
+        },
+    )
+    randomize_mass = EventTerm(
+        func=mdp.randomize_rigid_body_mass,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
+            "mass_distribution_params": (-1.0, 1.5),
+            "operation": "add",
+        },
+    )
+
+
+@configclass
+class QuadrupedSpiderStudentEnvCfg(QuadrupedspiderEnvCfg):
+    observations: StudentObservationsCfg = StudentObservationsCfg()
+    events: StudentEventCfg = StudentEventCfg()
+==> source/QuadrupedSpider/QuadrupedSpider/tasks/manager_based/__init__.py <==
+# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+import gymnasium as gym  # noqa: F401
+
+==> source/QuadrupedSpider/QuadrupedSpider/tasks/__init__.py <==
+# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""Package containing task implementations for the extension."""
+
+##
+# Register Gym environments.
+##
+
+from isaaclab_tasks.utils import import_packages
+
+# The blacklist is used to prevent importing configs from sub-packages
+_BLACKLIST_PKGS = ["utils", ".mdp"]
+# Import all configs in this package
+import_packages(__name__, _BLACKLIST_PKGS)
+
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+import omni.ext
+
+
+# Functions and vars are available to other extension as usual in python: `example.python_ext.some_public_function(x)`
+def some_public_function(x: int):
+    print("[QuadrupedSpider] some_public_function was called with x: ", x)
+    return x**x
+
+
+# Any class derived from `omni.ext.IExt` in top level module (defined in `python.modules` of `extension.toml`) will be
+# instantiated when extension gets enabled and `on_startup(ext_id)` will be called. Later when extension gets disabled
+# on_shutdown() is called.
+class ExampleExtension(omni.ext.IExt):
+    # ext_id is current extension id. It can be used with extension manager to query additional information, like where
+    # this extension is located on filesystem.
+    def on_startup(self, ext_id):
+        print("[QuadrupedSpider] startup")
+
+        self._count = 0
+
+        self._window = omni.ui.Window("My Window", width=300, height=300)
+        with self._window.frame:
+            with omni.ui.VStack():
+                label = omni.ui.Label("")
+
+                def on_click():
+                    self._count += 1
+                    label.text = f"count: {self._count}"
+
+                def on_reset():
+                    self._count = 0
+                    label.text = "empty"
+
+                on_reset()
+
+                with omni.ui.HStack():
+                    omni.ui.Button("Add", clicked_fn=on_click)
+                    omni.ui.Button("Reset", clicked_fn=on_reset)
+
+    def on_shutdown(self):
+        print("[QuadrupedSpider] shutdown")
+==> source/QuadrupedSpider/QuadrupedSpider/__init__.py <==
+# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""
+Python module serving as a project/extension template.
+"""
+
+# Register Gym environments.
+from .tasks import *
+
+
+==> source/QuadrupedSpider/QuadrupedSpider/models/__init__.py <==
+from .belief_actor import MikiBeliefStudent, MikiStudentTeacher, BeliefDistillation
+
+__all__ = ["MikiBeliefStudent", "MikiStudentTeacher", "BeliefDistillation"]
+==> source/QuadrupedSpider/QuadrupedSpider/models/belief_actor.py <==
+import torch
+import torch.nn as nn
+from rsl_rl.algorithms import Distillation
+from rsl_rl.modules import ActorCritic
+
+
+class MikiBeliefStudent(nn.Module):
+    def __init__(
+        self,
+        num_student_obs: int,
+        num_actions: int = 12,
+        prop_dim: int = 45,
+        priv_dim: int = 124,
+        latent_dim: int = 64,
+        rnn_hidden_size: int = 256,
+        rnn_num_layers: int = 2,
+    ):
+        super().__init__()
+        self.prop_dim = prop_dim
+        self.priv_dim = priv_dim
+        self.latent_dim = latent_dim
+        self.rnn_hidden_size = rnn_hidden_size
+        self.rnn_num_layers = rnn_num_layers
+
+        # Recurrent Belief Encoder GRU handling observation history
+        self.gru = nn.GRU(
+            input_size=num_student_obs,
+            hidden_size=rnn_hidden_size,
+            num_layers=rnn_num_layers,
+            batch_first=True,
+        )
+
+        # Latent projection and Attention Gating
+        self.latent_proj = nn.Sequential(
+            nn.ELU(),
+            nn.Linear(rnn_hidden_size, latent_dim),
+        )
+        self.gate = nn.Sequential(
+            nn.Linear(rnn_hidden_size, latent_dim),
+            nn.Sigmoid(),
+        )
+
+        # Privileged State Reconstruction Decoder
+        # Predicts 3D base linear velocity and 121D clean height scan
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, 128),
+            nn.ELU(),
+            nn.Linear(128, 128),
+            nn.ELU(),
+            nn.Linear(128, priv_dim),
+        )
+
+        # Student Policy MLP
+        # Conditioned on immediate proprioception and the gated belief state
+        self.actor_mlp = nn.Sequential(
+            nn.Linear(prop_dim + latent_dim, 512),
+            nn.ELU(),
+            nn.Linear(512, 256),
+            nn.ELU(),
+            nn.Linear(256, 128),
+            nn.ELU(),
+            nn.Linear(128, num_actions),
+        )
+
+        self.hidden_state = None
+        self.last_reconstructed_priv = None
+
+    def reset(self, dones=None):
+        if self.hidden_state is not None and dones is not None:
+            self.hidden_state[:, dones > 0, :] = 0.0
+
+    def forward(self, obs: torch.Tensor, masks=None, hidden_states=None):
+        if obs.dim() == 1:
+            obs = obs.unsqueeze(0)
+
+        is_seq = obs.dim() == 3
+        if not is_seq:
+            obs_seq = obs.unsqueeze(1)
+            batch_size = obs.shape[0]
+            
+            if self.hidden_state is None or self.hidden_state.shape[1] != batch_size:
+                self.hidden_state = torch.zeros(
+                    self.rnn_num_layers, batch_size, self.rnn_hidden_size, device=obs.device
+                )
+            h_in = self.hidden_state
+        else:
+            obs_seq = obs.transpose(0, 1)
+            batch_size = obs_seq.shape[0]
+            
+            if hidden_states is not None:
+                h_in = hidden_states
+                if h_in.dim() == 2:
+                    h_in = h_in.unsqueeze(0).expand(self.rnn_num_layers, -1, -1).contiguous()
+                elif h_in.dim() == 3 and h_in.shape[0] != self.rnn_num_layers:
+                    h_in = h_in.transpose(0, 1).contiguous()
+            else:
+                h_in = torch.zeros(
+                    self.rnn_num_layers, batch_size, self.rnn_hidden_size, device=obs.device
+                )
+
+        gru_out, h_out = self.gru(obs_seq, h_in)
+
+        if not is_seq:
+            self.hidden_state = h_out.detach()
+            gru_out = gru_out.squeeze(1)
+            current_prop = obs[..., :self.prop_dim]
+        else:
+            gru_out = gru_out.transpose(0, 1)
+            current_prop = obs[..., :self.prop_dim]
+
+        raw_latent = self.latent_proj(gru_out)
+        alpha = self.gate(gru_out)
+        belief_latent = alpha * raw_latent
+
+        self.last_reconstructed_priv = self.decoder(belief_latent)
+
+        actions = self.actor_mlp(torch.cat([current_prop, belief_latent], dim=-1))
+        return actions
+
+
+class MikiStudentTeacher(nn.Module):
+    """Wraps MikiBeliefStudent and a flat frozen Teacher."""
+    def __init__(
+        self,
+        obs,
+        obs_groups,
+        num_actions,
+        prop_dim=45,
+        priv_dim=124,
+        latent_dim=64,
+        rnn_hidden_dim=256,
+        rnn_num_layers=2,
+        student_hidden_dims=[512, 256, 128],
+        teacher_hidden_dims=[512, 256, 128],
+        **kwargs,
+    ):
+        super().__init__()
+        self.is_recurrent = True
+        self.obs_groups = obs_groups
+
+        num_student_obs = sum(obs[g].shape[-1] for g in obs_groups["policy"])
+
+        self.student = MikiBeliefStudent(
+            num_student_obs=num_student_obs,
+            num_actions=num_actions,
+            prop_dim=prop_dim,
+            priv_dim=priv_dim,
+            latent_dim=latent_dim,
+            rnn_hidden_size=rnn_hidden_dim,
+            rnn_num_layers=rnn_num_layers,
+        )
+
+        teacher_obs_groups = {
+            "policy": obs_groups["teacher"],
+            "critic": obs_groups["teacher"]
+        }
+        
+        self.teacher = ActorCritic(
+            obs=obs,
+            obs_groups=teacher_obs_groups,
+            num_actions=num_actions,
+            actor_hidden_dims=teacher_hidden_dims,
+            critic_hidden_dims=teacher_hidden_dims,
+            activation="elu",
+        )
+
+        for param in self.teacher.parameters():
+            param.requires_grad = False
+            
+        self.loaded_teacher = False
+
+    def reset(self, dones=None):
+        self.student.reset(dones)
+        self.teacher.reset(dones)
+
+    def load_state_dict(self, state_dict, strict=True):
+        if "actor.0.weight" in state_dict and not any(k.startswith("student.") for k in state_dict.keys()):
+            self.loaded_teacher = True
+            return self.teacher.load_state_dict(state_dict, strict=strict)
+        else:
+            self.loaded_teacher = True
+            return super().load_state_dict(state_dict, strict=strict)
+
+    def _extract_obs(self, obs, group_name="policy"):
+        """Strictly extracts observation tensors matching the target dimension (166 for policy, 169 for teacher)."""
+        target_dim = 166 if group_name == "policy" else 169
+
+        if isinstance(obs, dict):
+            # Check if group key exists directly and has correct dimension
+            if group_name in obs and isinstance(obs[group_name], torch.Tensor):
+                t = obs[group_name]
+                if t.shape[-1] == target_dim:
+                    return t
+
+            # Search dictionary values specifically for the exact target dimension
+            for v in obs.values():
+                if isinstance(v, torch.Tensor) and v.shape[-1] == target_dim:
+                    return v
+                if isinstance(v, dict):
+                    sub_tensors = [sub_v.reshape(sub_v.shape[0], -1) for sub_v in v.values() if isinstance(sub_v, torch.Tensor)]
+                    if sub_tensors:
+                        sub_cat = torch.cat(sub_tensors, dim=-1)
+                        if sub_cat.shape[-1] == target_dim:
+                            return sub_cat
+
+            # Fallback scan across all tensors for any tensor matching target dimension
+            flat_tensors = [v.reshape(v.shape[0], -1) for v in obs.values() if isinstance(v, torch.Tensor) and v.dim() >= 2]
+            for ft in flat_tensors:
+                if ft.shape[-1] == target_dim:
+                    return ft
+
+        if isinstance(obs, torch.Tensor) and obs.shape[-1] == target_dim:
+            return obs
+
+        return obs
+
+    def act(self, obs, **kwargs):
+        student_obs = self._extract_obs(obs, "policy")
+        return self.student(student_obs, **kwargs)
+
+    def act_inference(self, obs, **kwargs):
+        student_obs = self._extract_obs(obs, "policy")
+        return self.student(student_obs, **kwargs)
+
+    def act_teacher(self, obs, **kwargs):
+        return self.teacher.act_inference(obs, **kwargs)
+
+    def evaluate(self, obs, **kwargs):
+        teacher_obs = self._extract_obs(obs, "teacher")
+        return self.teacher.act_inference(teacher_obs, **kwargs)
+
+    def update_normalization(self, obs, **kwargs):
+        pass
+
+
+class BeliefDistillation(Distillation):
+    """
+    Miki et al. Dual-Loss Distillation
+    """
+    def __init__(self, policy, lambda_bc=1.0, lambda_rec=0.5, prop_dim=45, **kwargs):
+        super().__init__(policy, **kwargs)
+        self.lambda_bc = lambda_bc
+        self.lambda_rec = lambda_rec
+        self.prop_dim = prop_dim
+        self.mse_loss = nn.MSELoss()
+
+    def update(self):
+        mean_behavior_loss = 0.0
+        mean_rec_loss = 0.0
+        num_updates = 0
+
+        num_envs = self.storage.num_envs
+        num_transitions = self.storage.num_transitions_per_env
+        num_mini_batches = getattr(self, "num_mini_batches", 4)
+        envs_per_batch = num_envs // num_mini_batches
+
+        obs_buffer = self.storage.observations
+        device = list(obs_buffer.values())[0].device if isinstance(obs_buffer, dict) else obs_buffer.device
+
+        for epoch in range(self.num_learning_epochs):
+            env_indices = torch.randperm(num_envs, device=device)
+
+            for i in range(num_mini_batches):
+                batch_env_idx = env_indices[i * envs_per_batch : (i + 1) * envs_per_batch]
+
+                if isinstance(obs_buffer, dict):
+                    sliced_obs = {k: (v[:, batch_env_idx] if isinstance(v, torch.Tensor) else {sub_k: sub_v[:, batch_env_idx] for sub_k, sub_v in v.items()}) for k, v in obs_buffer.items()}
+                    obs_batch = self.policy._extract_obs(sliced_obs, "policy")
+                else:
+                    obs_batch = obs_buffer[:, batch_env_idx]
+
+                priv_buffer = getattr(self.storage, "privileged_observations", obs_buffer)
+                if isinstance(priv_buffer, dict):
+                    sliced_priv = {k: (v[:, batch_env_idx] if isinstance(v, torch.Tensor) else {sub_k: sub_v[:, batch_env_idx] for sub_k, sub_v in v.items()}) for k, v in priv_buffer.items()}
+                    teacher_obs_batch = self.policy._extract_obs(sliced_priv, "teacher")
+                else:
+                    teacher_obs_batch = priv_buffer[:, batch_env_idx]
+
+                hid_states_batch = None
+                if hasattr(self.storage, "hidden_states") and self.storage.hidden_states is not None:
+                    hid_states_batch = self.storage.hidden_states[0, batch_env_idx]
+                    if isinstance(hid_states_batch, (tuple, list)):
+                        hid_states_batch = hid_states_batch[0]
+                        
+                    if hid_states_batch is not None:
+                        if hid_states_batch.dim() == 3 and hid_states_batch.shape[0] != self.policy.student.rnn_num_layers:
+                            hid_states_batch = hid_states_batch.transpose(0, 1).contiguous()
+                        elif hid_states_batch.dim() == 2:
+                            hid_states_batch = hid_states_batch.unsqueeze(0).expand(self.policy.student.rnn_num_layers, -1, -1).contiguous()
+
+                masks_batch = self.storage.dones[:, batch_env_idx] if hasattr(self.storage, "dones") else None
+
+                with torch.no_grad():
+                    flat_teacher_obs = teacher_obs_batch.reshape(-1, teacher_obs_batch.shape[-1])
+                    flat_actions = self.policy.teacher.act_inference(flat_teacher_obs)
+                    actions_teacher = flat_actions.view(num_transitions, len(batch_env_idx), -1)
+
+                pred_actions = self.policy.student(obs_batch, masks=masks_batch, hidden_states=hid_states_batch)
+                pred_priv = self.policy.student.last_reconstructed_priv
+
+                target_priv = teacher_obs_batch[..., self.prop_dim:]
+
+                bc_loss = self.mse_loss(pred_actions, actions_teacher.detach())
+                rec_loss = self.mse_loss(pred_priv, target_priv.detach())
+
+                total_loss = self.lambda_bc * bc_loss + self.lambda_rec * rec_loss
+
+                self.optimizer.zero_grad()
+                total_loss.backward()
+                nn.utils.clip_grad_norm_(self.policy.student.parameters(), self.max_grad_norm)
+                self.optimizer.step()
+
+                mean_behavior_loss += bc_loss.item()
+                mean_rec_loss += rec_loss.item()
+                num_updates += 1
+
+        self.storage.clear()
+        return {
+            "behavior": mean_behavior_loss / max(num_updates, 1),
+            "reconstruction": mean_rec_loss / max(num_updates, 1),
+        }
+==> scripts/rsl_rl/play.py <==
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""Script to play a checkpoint if an RL agent from RSL-RL."""
+
+"""Launch Isaac Sim Simulator first."""
+
+import argparse
+import sys
+
+from isaaclab.app import AppLauncher
+
+# local imports
+import cli_args  # isort: skip
+
+# add argparse arguments
+parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
+parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
+parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
+parser.add_argument(
+    "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
+)
+parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
+parser.add_argument("--task", type=str, default=None, help="Name of the task.")
+parser.add_argument(
+    "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
+)
+parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
+parser.add_argument(
+    "--use_pretrained_checkpoint",
+    action="store_true",
+    help="Use the pre-trained checkpoint from Nucleus.",
+)
+parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+# append RSL-RL cli arguments
+cli_args.add_rsl_rl_args(parser)
+# append AppLauncher cli args
+AppLauncher.add_app_launcher_args(parser)
+# parse the arguments
+args_cli, hydra_args = parser.parse_known_args()
+# always enable cameras to record video
+if args_cli.video:
+    args_cli.enable_cameras = True
+
+# clear out sys.argv for Hydra
+sys.argv = [sys.argv[0]] + hydra_args
+
+# launch omniverse app
+app_launcher = AppLauncher(args_cli)
+simulation_app = app_launcher.app
+
+"""Rest everything follows."""
+
+import os
+import time
+
+import gymnasium as gym
+import torch
+from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+
+from isaaclab.envs import (
+    DirectMARLEnv,
+    DirectMARLEnvCfg,
+    DirectRLEnvCfg,
+    ManagerBasedRLEnvCfg,
+    multi_agent_to_single_agent,
+)
+from isaaclab.utils.assets import retrieve_file_path
+from isaaclab.utils.dict import print_dict
+
+from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, export_policy_as_jit, export_policy_as_onnx
+from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
+
+import isaaclab_tasks  # noqa: F401
+from isaaclab_tasks.utils import get_checkpoint_path
+from isaaclab_tasks.utils.hydra import hydra_task_config
+
+import QuadrupedSpider.tasks  # noqa: F401
+
+
+@hydra_task_config(args_cli.task, args_cli.agent)
+def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
+    """Play with RSL-RL agent."""
+    # grab task name for checkpoint path
+    task_name = args_cli.task.split(":")[-1]
+    train_task_name = task_name.replace("-Play", "")
+
+    # override configurations with non-hydra CLI arguments
+    agent_cfg: RslRlBaseRunnerCfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
+    env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+
+    # set the environment seed
+    # note: certain randomizations occur in the environment initialization so we set the seed here
+    env_cfg.seed = agent_cfg.seed
+    env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+
+    # specify directory for logging experiments
+    log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
+    log_root_path = os.path.abspath(log_root_path)
+    print(f"[INFO] Loading experiment from directory: {log_root_path}")
+    if args_cli.use_pretrained_checkpoint:
+        resume_path = get_published_pretrained_checkpoint("rsl_rl", train_task_name)
+        if not resume_path:
+            print("[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task.")
+            return
+    elif args_cli.checkpoint:
+        resume_path = retrieve_file_path(args_cli.checkpoint)
+    else:
+        resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+
+    log_dir = os.path.dirname(resume_path)
+
+    # set the log directory for the environment (works for all environment types)
+    env_cfg.log_dir = log_dir
+
+    # create isaac environment
+    env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+
+    # convert to single-agent instance if required by the RL algorithm
+    if isinstance(env.unwrapped, DirectMARLEnv):
+        env = multi_agent_to_single_agent(env)
+
+    # wrap for video recording
+    if args_cli.video:
+        video_kwargs = {
+            "video_folder": os.path.join(log_dir, "videos", "play"),
+            "step_trigger": lambda step: step == 0,
+            "video_length": args_cli.video_length,
+            "disable_logger": True,
+        }
+        print("[INFO] Recording videos during training.")
+        print_dict(video_kwargs, nesting=4)
+        env = gym.wrappers.RecordVideo(env, **video_kwargs)
+
+    # wrap around environment for rsl-rl
+    env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+
+    print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+    # load previously trained model
+    if agent_cfg.class_name == "OnPolicyRunner":
+        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    elif agent_cfg.class_name == "DistillationRunner":
+        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    else:
+        raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+    runner.load(resume_path)
+
+    # obtain the trained policy for inference
+    policy = runner.get_inference_policy(device=env.unwrapped.device)
+
+    # extract the neural network module
+    # we do this in a try-except to maintain backwards compatibility.
+    try:
+        # version 2.3 onwards
+        policy_nn = runner.alg.policy
+    except AttributeError:
+        # version 2.2 and below
+        policy_nn = runner.alg.actor_critic
+
+    # extract the normalizer
+    if hasattr(policy_nn, "actor_obs_normalizer"):
+        normalizer = policy_nn.actor_obs_normalizer
+    elif hasattr(policy_nn, "student_obs_normalizer"):
+        normalizer = policy_nn.student_obs_normalizer
+    else:
+        normalizer = None
+
+    # export policy to onnx/jit
+    export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
+    export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
+    export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
+
+    dt = env.unwrapped.step_dt
+
+    # reset environment
+    obs = env.get_observations()
+    timestep = 0
+    # simulate environment
+    while simulation_app.is_running():
+        start_time = time.time()
+        # run everything in inference mode
+        with torch.inference_mode():
+            # agent stepping
+            actions = policy(obs)
+            # env stepping
+            obs, _, dones, _ = env.step(actions)
+            # reset recurrent states for episodes that have terminated
+            policy_nn.reset(dones)
+        if args_cli.video:
+            timestep += 1
+            # Exit the play loop after recording one video
+            if timestep == args_cli.video_length:
+                break
+
+        # time delay for real-time evaluation
+        sleep_time = dt - (time.time() - start_time)
+        if args_cli.real_time and sleep_time > 0:
+            time.sleep(sleep_time)
+
+    # close the simulator
+    env.close()
+
+
+if __name__ == "__main__":
+    # run the main function
+    main()
+    # close sim app
+    simulation_app.close()
+
+==> scripts/rsl_rl/train.py <==
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""Script to train RL agent with RSL-RL."""
+
+"""Launch Isaac Sim Simulator first."""
+
+import argparse
+import sys
+
+from isaaclab.app import AppLauncher
+
+# local imports
+import cli_args  # isort: skip
+
+# add argparse arguments
+parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
+parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
+parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
+parser.add_argument("--video_interval", type=int, default=2000, help="Interval between video recordings (in steps).")
+parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
+parser.add_argument("--task", type=str, default=None, help="Name of the task.")
+parser.add_argument(
+    "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
+)
+parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
+parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+parser.add_argument(
+    "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
+)
+parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
+parser.add_argument(
+    "--ray-proc-id", "-rid", type=int, default=None, help="Automatically configured by Ray integration, otherwise None."
+)
+# append RSL-RL cli arguments
+cli_args.add_rsl_rl_args(parser)
+# append AppLauncher cli args
+AppLauncher.add_app_launcher_args(parser)
+args_cli, hydra_args = parser.parse_known_args()
+
+# always enable cameras to record video
+if args_cli.video:
+    args_cli.enable_cameras = True
+
+# clear out sys.argv for Hydra
+sys.argv = [sys.argv[0]] + hydra_args
+
+# launch omniverse app
+app_launcher = AppLauncher(args_cli)
+simulation_app = app_launcher.app
+
+"""Check for minimum supported RSL-RL version."""
+
+import importlib.metadata as metadata
+import platform
+
+from packaging import version
+
+# check minimum supported rsl-rl version
+RSL_RL_VERSION = "3.0.1"
+installed_version = metadata.version("rsl-rl-lib")
+if version.parse(installed_version) < version.parse(RSL_RL_VERSION):
+    if platform.system() == "Windows":
+        cmd = [r".\isaaclab.bat", "-p", "-m", "pip", "install", f"rsl-rl-lib=={RSL_RL_VERSION}"]
+    else:
+        cmd = ["./isaaclab.sh", "-p", "-m", "pip", "install", f"rsl-rl-lib=={RSL_RL_VERSION}"]
+    print(
+        f"Please install the correct version of RSL-RL.\nExisting version is: '{installed_version}'"
+        f" and required version is: '{RSL_RL_VERSION}'.\nTo install the correct version, run:"
+        f"\n\n\t{' '.join(cmd)}\n"
+    )
+    exit(1)
+
+"""Rest everything follows."""
+
+import logging
+import os
+import time
+from datetime import datetime
+
+import gymnasium as gym
+import torch
+from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+
+from isaaclab.envs import (
+    DirectMARLEnv,
+    DirectMARLEnvCfg,
+    DirectRLEnvCfg,
+    ManagerBasedRLEnvCfg,
+    multi_agent_to_single_agent,
+)
+from isaaclab.utils.dict import print_dict
+from isaaclab.utils.io import dump_yaml
+
+from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
+
+import isaaclab_tasks  # noqa: F401
+from isaaclab_tasks.utils import get_checkpoint_path
+from isaaclab_tasks.utils.hydra import hydra_task_config
+
+# import logger
+logger = logging.getLogger(__name__)
+
+import QuadrupedSpider.tasks  # noqa: F401
+import rsl_rl.runners.distillation_runner as dr
+from QuadrupedSpider.models import MikiStudentTeacher, BeliefDistillation
+dr.MikiStudentTeacher = MikiStudentTeacher
+dr.BeliefDistillation = BeliefDistillation
+
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.deterministic = False
+torch.backends.cudnn.benchmark = False
+
+
+@hydra_task_config(args_cli.task, args_cli.agent)
+def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
+    """Train with RSL-RL agent."""
+    # override configurations with non-hydra CLI arguments
+    agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
+    env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    agent_cfg.max_iterations = (
+        args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
+    )
+
+    # set the environment seed
+    # note: certain randomizations occur in the environment initialization so we set the seed here
+    env_cfg.seed = agent_cfg.seed
+    env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    # check for invalid combination of CPU device with distributed training
+    if args_cli.distributed and args_cli.device is not None and "cpu" in args_cli.device:
+        raise ValueError(
+            "Distributed training is not supported when using CPU device. "
+            "Please use GPU device (e.g., --device cuda) for distributed training."
+        )
+
+    # multi-gpu training configuration
+    if args_cli.distributed:
+        env_cfg.sim.device = f"cuda:{app_launcher.local_rank}"
+        agent_cfg.device = f"cuda:{app_launcher.local_rank}"
+
+        # set seed to have diversity in different threads
+        seed = agent_cfg.seed + app_launcher.local_rank
+        env_cfg.seed = seed
+        agent_cfg.seed = seed
+
+    # specify directory for logging experiments
+    log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
+    log_root_path = os.path.abspath(log_root_path)
+    print(f"[INFO] Logging experiment in directory: {log_root_path}")
+    # specify directory for logging runs: {time-stamp}_{run_name}
+    log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    # The Ray Tune workflow extracts experiment name using the logging line below, hence, do not
+    # change it (see PR #2346, comment-2819298849)
+    print(f"Exact experiment name requested from command line: {log_dir}")
+    if agent_cfg.run_name:
+        log_dir += f"_{agent_cfg.run_name}"
+    log_dir = os.path.join(log_root_path, log_dir)
+
+    # set the IO descriptors export flag if requested
+    if isinstance(env_cfg, ManagerBasedRLEnvCfg):
+        env_cfg.export_io_descriptors = args_cli.export_io_descriptors
+    else:
+        logger.warning(
+            "IO descriptors are only supported for manager based RL environments. No IO descriptors will be exported."
+        )
+
+    # set the log directory for the environment (works for all environment types)
+    env_cfg.log_dir = log_dir
+
+    # create isaac environment
+    env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+
+    # convert to single-agent instance if required by the RL algorithm
+    if isinstance(env.unwrapped, DirectMARLEnv):
+        env = multi_agent_to_single_agent(env)
+
+    # save resume path before creating a new log_dir
+    if hasattr(args_cli, "checkpoint") and args_cli.checkpoint:
+        resume_path = args_cli.checkpoint
+    elif agent_cfg.resume or "Distillation" in agent_cfg.algorithm.class_name:
+        resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+    else:
+        resume_path = None
+
+    # wrap for video recording
+    if args_cli.video:
+        video_kwargs = {
+            "video_folder": os.path.join(log_dir, "videos", "train"),
+            "step_trigger": lambda step: step % args_cli.video_interval == 0,
+            "video_length": args_cli.video_length,
+            "disable_logger": True,
+        }
+        print("[INFO] Recording videos during training.")
+        print_dict(video_kwargs, nesting=4)
+        env = gym.wrappers.RecordVideo(env, **video_kwargs)
+
+    start_time = time.time()
+
+    # wrap around environment for rsl-rl
+    env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+
+    # create runner from rsl-rl
+    if agent_cfg.class_name == "OnPolicyRunner":
+        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    elif agent_cfg.class_name == "DistillationRunner":
+        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    else:
+        raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+    # write git state to logs
+    runner.add_git_repo_to_log(__file__)
+    # load the checkpoint
+    if agent_cfg.resume or "Distillation" in agent_cfg.algorithm.class_name:
+        print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+        # load previously trained model
+        runner.load(resume_path, load_optimizer=agent_cfg.resume)
+
+    # dump the configuration into log-directory
+    dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
+    dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+
+    # run training
+    runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
+
+    print(f"Training time: {round(time.time() - start_time, 2)} seconds")
+
+    # close the simulator
+    env.close()
+
+
+if __name__ == "__main__":
+    # run the main function
+    main()
+    # close sim app
+    simulation_app.close()
+
+==> scripts/rsl_rl/cli_args.py <==
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+from __future__ import annotations
+
+import argparse
+import random
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg
+
+
+def add_rsl_rl_args(parser: argparse.ArgumentParser):
+    """Add RSL-RL arguments to the parser.
+
+    Args:
+        parser: The parser to add the arguments to.
+    """
+    # create a new argument group
+    arg_group = parser.add_argument_group("rsl_rl", description="Arguments for RSL-RL agent.")
+    # -- experiment arguments
+    arg_group.add_argument(
+        "--experiment_name", type=str, default=None, help="Name of the experiment folder where logs will be stored."
+    )
+    arg_group.add_argument("--run_name", type=str, default=None, help="Run name suffix to the log directory.")
+    # -- load arguments
+    arg_group.add_argument("--resume", action="store_true", default=False, help="Whether to resume from a checkpoint.")
+    arg_group.add_argument("--load_run", type=str, default=None, help="Name of the run folder to resume from.")
+    arg_group.add_argument("--checkpoint", type=str, default=None, help="Checkpoint file to resume from.")
+    # -- logger arguments
+    arg_group.add_argument(
+        "--logger", type=str, default=None, choices={"wandb", "tensorboard", "neptune"}, help="Logger module to use."
+    )
+    arg_group.add_argument(
+        "--log_project_name", type=str, default=None, help="Name of the logging project when using wandb or neptune."
+    )
+
+
+def parse_rsl_rl_cfg(task_name: str, args_cli: argparse.Namespace) -> RslRlBaseRunnerCfg:
+    """Parse configuration for RSL-RL agent based on inputs.
+
+    Args:
+        task_name: The name of the environment.
+        args_cli: The command line arguments.
+
+    Returns:
+        The parsed configuration for RSL-RL agent based on inputs.
+    """
+    from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
+
+    # load the default configuration
+    rslrl_cfg: RslRlBaseRunnerCfg = load_cfg_from_registry(task_name, "rsl_rl_cfg_entry_point")
+    rslrl_cfg = update_rsl_rl_cfg(rslrl_cfg, args_cli)
+    return rslrl_cfg
+
+
+def update_rsl_rl_cfg(agent_cfg: RslRlBaseRunnerCfg, args_cli: argparse.Namespace):
+    """Update configuration for RSL-RL agent based on inputs.
+
+    Args:
+        agent_cfg: The configuration for RSL-RL agent.
+        args_cli: The command line arguments.
+
+    Returns:
+        The updated configuration for RSL-RL agent based on inputs.
+    """
+    # override the default configuration with CLI arguments
+    if hasattr(args_cli, "seed") and args_cli.seed is not None:
+        # randomly sample a seed if seed = -1
+        if args_cli.seed == -1:
+            args_cli.seed = random.randint(0, 10000)
+        agent_cfg.seed = args_cli.seed
+    if args_cli.resume is not None:
+        agent_cfg.resume = args_cli.resume
+    if args_cli.load_run is not None:
+        agent_cfg.load_run = args_cli.load_run
+    if args_cli.checkpoint is not None:
+        agent_cfg.load_checkpoint = args_cli.checkpoint
+    if args_cli.run_name is not None:
+        agent_cfg.run_name = args_cli.run_name
+    if args_cli.logger is not None:
+        agent_cfg.logger = args_cli.logger
+    # set the project name for wandb and neptune
+    if agent_cfg.logger in {"wandb", "neptune"} and args_cli.log_project_name:
+        agent_cfg.wandb_project = args_cli.log_project_name
+        agent_cfg.neptune_project = args_cli.log_project_name
+
+    return agent_cfg
+
+==> scripts/rsl_rl/controll.py <==
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""Script to play an RL agent using Isaac Sim's internal ROS 2 bridge for Xbox teleoperation."""
+
+import argparse
+import os
+import sys
+import time
+from rsl_rl.runners import DistillationRunner
+
+# Purge system ROS 2 (3.10) paths from environment so they don't break Python 3.11
+sys.path = [p for p in sys.path if not p.startswith("/opt/ros")]
+if "PYTHONPATH" in os.environ:
+    os.environ["PYTHONPATH"] = ":".join(
+        [p for p in os.environ["PYTHONPATH"].split(":") if not p.startswith("/opt/ros")]
+    )
+
+from isaaclab.app import AppLauncher
+
+# local imports
+import cli_args  # isort: skip
+
+# add argparse arguments
+parser = argparse.ArgumentParser(description="Play an RL agent with RSL-RL and ROS 2 teleop.")
+parser.add_argument("--video", action="store_true", default=False, help="Record videos during play.")
+parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
+parser.add_argument(
+    "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
+)
+parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
+parser.add_argument("--task", type=str, default=None, help="Name of the task.")
+parser.add_argument(
+    "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
+)
+parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment.")
+parser.add_argument(
+    "--use_pretrained_checkpoint",
+    action="store_true",
+    help="Use the pre-trained checkpoint from Nucleus.",
+)
+parser.add_argument("--real-time", action="store_true", default=True, help="Run in real-time, if possible.")
+# append RSL-RL cli arguments
+cli_args.add_rsl_rl_args(parser)
+# append AppLauncher cli args
+AppLauncher.add_app_launcher_args(parser)
+# parse the arguments
+args_cli, hydra_args = parser.parse_known_args()
+if args_cli.video:
+    args_cli.enable_cameras = True
+
+# clear out sys.argv for Hydra
+sys.argv = [sys.argv[0]] + hydra_args
+
+# launch omniverse app
+app_launcher = AppLauncher(args_cli)
+simulation_app = app_launcher.app
+
+"""Enable Built-in Isaac Sim ROS 2 Bridge (compiled for internal Python)"""
+from isaacsim.core.utils.extensions import enable_extension
+
+enable_extension("isaacsim.ros2.bridge")
+simulation_app.update()
+
+"""Imports that depend on Isaac Sim's internal ROS 2 environment"""
+import gymnasium as gym
+import rclpy
+from geometry_msgs.msg import Twist
+from rclpy.node import Node
+from sensor_msgs.msg import Joy
+import torch
+from rsl_rl.runners import OnPolicyRunner
+
+from isaaclab.envs import ManagerBasedRLEnv, ManagerBasedRLEnvCfg
+from isaaclab.utils.assets import retrieve_file_path
+
+from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
+
+import isaaclab_tasks  # noqa: F401
+from isaaclab_tasks.utils import get_checkpoint_path
+from isaaclab_tasks.utils.hydra import hydra_task_config
+
+import QuadrupedSpider.tasks  # noqa: F401
+
+
+class RosTeleopNode(Node):
+    """ROS 2 listener node for teleoperation and manual reset commands."""
+
+    def __init__(self):
+        super().__init__("isaac_teleop_node")
+        self.cmd_vel = [0.0, 0.0, 0.0]
+        self.reset_requested = False
+
+        self.twist_sub = self.create_subscription(Twist, "/cmd_vel", self._cmd_vel_callback, 10)
+        self.joy_sub = self.create_subscription(Joy, "/joy", self._joy_callback, 10)
+
+    def _cmd_vel_callback(self, msg: Twist):
+        self.cmd_vel = [float(msg.linear.x), float(msg.linear.y), float(msg.angular.z)]
+
+    def _joy_callback(self, msg: Joy):
+        # Button index 0 is 'A' on standard Xbox mappings
+        if len(msg.buttons) > 0 and msg.buttons[0] == 1:
+            self.reset_requested = True
+
+
+@hydra_task_config(args_cli.task, args_cli.agent)
+def main(env_cfg: ManagerBasedRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
+    """Play with RSL-RL agent using ROS 2 teleoperation."""
+    agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
+    if args_cli.num_envs is not None:
+        env_cfg.scene.num_envs = args_cli.num_envs
+
+    env_cfg.seed = agent_cfg.seed
+    env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+
+    # Keep robot alive indefinitely during play
+    env_cfg.episode_length_s = 1e6
+    if hasattr(env_cfg, "terminations"):
+        env_cfg.terminations = None
+
+    # Locate checkpoint
+    log_root_path = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
+    if args_cli.checkpoint:
+        resume_path = retrieve_file_path(args_cli.checkpoint)
+    else:
+        resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+
+    env_cfg.log_dir = os.path.dirname(resume_path)
+
+    # Initialize Environment
+    env = gym.make(args_cli.task, cfg=env_cfg)
+    env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+
+    print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+    if agent_cfg.class_name == "OnPolicyRunner":
+        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    elif agent_cfg.class_name == "DistillationRunner":
+        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    runner.load(resume_path)
+
+    policy = runner.get_inference_policy(device=env.unwrapped.device)
+
+    # ROS 2 node initialization
+    if not rclpy.ok():
+        rclpy.init()
+    ros_node = RosTeleopNode()
+
+    print("\n" + "=" * 65)
+    print("[INFO] Isaac Sim ROS 2 Teleop Listener Active:")
+    print("  - Listening on /cmd_vel (Twist)")
+    print("  - Listening on /joy (Button 0 'A' triggers reset)")
+    print("=" * 65 + "\n")
+
+    command_term = None
+    if isinstance(env.unwrapped, ManagerBasedRLEnv) and "base_velocity" in env.unwrapped.command_manager.active_terms:
+        command_term = env.unwrapped.command_manager.get_term("base_velocity")
+
+    dt = env.unwrapped.step_dt
+    obs = env.get_observations()
+    loop_step = 0
+
+    while simulation_app.is_running():
+        start_time = time.time()
+
+        # Spin ROS events non-blockingly
+        rclpy.spin_once(ros_node, timeout_sec=0.0)
+
+        with torch.inference_mode():
+            # Manual reset triggered by Xbox button A
+            if ros_node.reset_requested:
+                print("[TELEOP] Button A pressed -> Resetting robot!")
+                ros_node.reset_requested = False
+                all_env_ids = torch.arange(env.unwrapped.num_envs, device=env.unwrapped.device)
+                env.unwrapped.reset(env_ids=all_env_ids)
+                obs = env.get_observations()
+
+            # Push velocity command into Isaac Lab manager buffer
+            cmd_tensor = torch.tensor(ros_node.cmd_vel, dtype=torch.float32, device=env.unwrapped.device)
+            if command_term is not None:
+                command_term.command[:] = cmd_tensor.repeat(env.unwrapped.num_envs, 1)
+
+            # Step policy & physics
+            actions = policy(obs)
+            obs, _, dones, _ = env.step(actions)
+
+            # Re-apply command tensor immediately after step
+            if command_term is not None:
+                command_term.command[:] = cmd_tensor.repeat(env.unwrapped.num_envs, 1)
+
+            if hasattr(policy, "reset"):
+                policy.reset(dones)
+
+            if loop_step % 60 == 0:
+                print(
+                    f"[Step {loop_step}] /cmd_vel: [{ros_node.cmd_vel[0]:.2f}, {ros_node.cmd_vel[1]:.2f}, {ros_node.cmd_vel[2]:.2f}] | Action Norm: {torch.norm(actions).item():.3f}"
+                )
+
+        loop_step += 1
+
+        sleep_time = dt - (time.time() - start_time)
+        if args_cli.real_time and sleep_time > 0:
+            time.sleep(sleep_time)
+
+    ros_node.destroy_node()
+    rclpy.shutdown()
+    env.close()
+
+
+if __name__ == "__main__":
+    main()
+    simulation_app.close()
