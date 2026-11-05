@@ -3,7 +3,7 @@
 #include "CommsBridge.h"
 
 // Used for testing without motors
-#define MOCK_MODE 1
+#define MOCK_MODE 0
 
 RobStrideCan motor;
 CommsBridge  comms;

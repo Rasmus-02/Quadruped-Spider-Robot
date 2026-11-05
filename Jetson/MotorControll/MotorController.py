@@ -3,9 +3,11 @@ import time
 import numpy as np
 import serial
 
+TOTAL_MOTORS = 1
+
 # Formats matching Teensy structs
-CMD_FMT = "<I12f"     # uint32 header + 12 float32 target positions
-TELEM_FMT = "<I36fB"  # uint32 header + 36 float32 (pos, vel, tau) + uint8 is_healthy
+CMD_FMT = f"<I{TOTAL_MOTORS}f"       # uint32 header + N float32 target positions
+TELEM_FMT = f"<I{TOTAL_MOTORS * 3}fB"  # uint32 header + 3N float32 (pos, vel, tau) + uint8 is_healthy
 
 CMD_HEADER = 0xAA55AA55
 TELEM_HEADER = 0x55AA55AA
@@ -22,9 +24,9 @@ class MotorController:
         time.sleep(0.5)
         self.ser.reset_input_buffer()  # Flush stale bytes received during boot
 
-        self.positions = np.zeros(12, dtype=np.float32)
-        self.velocities = np.zeros(12, dtype=np.float32)
-        self.torques = np.zeros(12, dtype=np.float32)
+        self.positions = np.zeros(TOTAL_MOTORS, dtype=np.float32)
+        self.velocities = np.zeros(TOTAL_MOTORS, dtype=np.float32)
+        self.torques = np.zeros(TOTAL_MOTORS, dtype=np.float32)
         self.is_healthy = False
         self._rx_buf = bytearray()
 
@@ -32,10 +34,10 @@ class MotorController:
     def send_action(self, target_positions):
         """Sends target joint angles (rad) to MotorController (Teensy).
             Args:
-            target_positions (iterable of float): Array containing 12 target joint target positions in radians, ordered according to motor id.
+            target_positions (iterable of float): Array containing target joint positions in radians, ordered according to motor id.
         """
-        if len(target_positions) != 12:
-            raise ValueError(f"Expected 12 target positions, got {len(target_positions)}")
+        if len(target_positions) != TOTAL_MOTORS:
+            raise ValueError(f"Expected {TOTAL_MOTORS} target positions, got {len(target_positions)}")
             
         payload = struct.pack(CMD_FMT, CMD_HEADER, *target_positions)
         try:
@@ -56,7 +58,7 @@ class MotorController:
             idx = self._rx_buf.find(TELEM_SYNC_BYTES)
 
             if idx == -1:
-                # Header not found; keep last 3 bytes in case header is split
+                # Header not found, keep last 3 bytes in case header is split
                 self._rx_buf = self._rx_buf[-3:]
                 break
 
@@ -73,10 +75,15 @@ class MotorController:
             del self._rx_buf[:TELEM_SIZE]
 
             unpacked = struct.unpack(TELEM_FMT, frame)
-            self.positions[:] = unpacked[1:13]
-            self.velocities[:] = unpacked[13:25]
-            self.torques[:] = unpacked[25:37]
-            self.is_healthy = bool(unpacked[37])
+            
+            pos_end = 1 + TOTAL_MOTORS
+            vel_end = pos_end + TOTAL_MOTORS
+            tau_end = vel_end + TOTAL_MOTORS
+            
+            self.positions[:] = unpacked[1:pos_end]
+            self.velocities[:] = unpacked[pos_end:vel_end]
+            self.torques[:] = unpacked[vel_end:tau_end]
+            self.is_healthy = bool(unpacked[tau_end])
 
         return self.positions, self.velocities, self.torques, self.is_healthy
 

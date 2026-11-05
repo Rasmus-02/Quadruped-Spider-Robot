@@ -3,16 +3,16 @@
 #include <FlexCAN_T4.h>
 
 // Control limits for RobStride-00 (safety)
-#define P_MIN  -12.56637f
-#define P_MAX   12.56637f
-#define V_MIN  -33.0f
-#define V_MAX   33.0f
-#define KP_MIN  0.0f
-#define KP_MAX  500.0f
-#define KD_MIN  0.0f
-#define KD_MAX  5.0f
-#define T_MIN  -14.0f
-#define T_MAX   14.0f
+constexpr float P_MIN = -12.56637f;
+constexpr float P_MAX = 12.56637f;
+constexpr float V_MIN = -33.0f;
+constexpr float V_MAX = 33.0f;
+constexpr float KP_MIN = 0.0f;
+constexpr float KP_MAX = 500.0f;
+constexpr float KD_MIN = 0.0f;
+constexpr float KD_MAX = 5.0f;
+constexpr float T_MIN = -14.0f;
+constexpr float T_MAX = 14.0f;
 
 // Motor -> Teensy (Used for RL observation)
 struct MotorFeedback {
@@ -29,7 +29,7 @@ class RobStrideCan {
 // Methods used to send and receive data to / from motors
 // =======================================================================================================
 public:
-  static const uint8_t TOTAL_MOTORS = 12;
+  static const uint8_t TOTAL_MOTORS = 1;
 
   // Default gains (Need to match Isaac Lab actuator config)
   float default_kp = 25.0f;

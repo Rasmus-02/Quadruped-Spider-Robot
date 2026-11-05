@@ -1,6 +1,6 @@
 import time
 import numpy as np
-from MotorController import MotorController
+from MotorController import MotorController, TOTAL_MOTORS
 
 
 def test_pipeline():
@@ -16,9 +16,9 @@ def test_pipeline():
         while True:
             t = time.time() - t_start
 
-            # Generate sine wave targets for all 12 joints
+            # Generate sine wave targets for all joints
             test_positions = np.array([
-                np.sin(t * 2.0 + i * 0.5) for i in range(12)
+                np.sin(t * 2.0 + i * 0.5) for i in range(TOTAL_MOTORS)
             ], dtype=np.float32)
 
             # Send action to Teensy
@@ -27,7 +27,7 @@ def test_pipeline():
             # Read echoed observation
             pos, vel, tau, healthy = controller.get_observation()
 
-            # 3. Print cleanly 5 times per second (using standard newlines)
+            # Print cleanly 5 times per second
             if time.time() - last_print >= 0.2:
                 last_print = time.time()
                 print(f"[Healthy: {healthy}] "
@@ -41,6 +41,7 @@ def test_pipeline():
     except KeyboardInterrupt:
         print("\nStopping.")
         controller.close()
+
 
 if __name__ == "__main__":
     test_pipeline()
