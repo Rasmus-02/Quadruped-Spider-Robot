@@ -59,6 +59,7 @@ simulation_app = app_launcher.app
 import gymnasium as gym
 import torch
 from rsl_rl.runners import OnPolicyRunner
+import rsl_rl.runners.on_policy_runner as opr
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -78,6 +79,9 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import QuadrupedSpider.tasks  # noqa: F401
+from QuadrupedSpider.models import StudentActorCritic, TeacherActorCritic
+
+opr.TeacherActorCritic = TeacherActorCritic
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -86,7 +90,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     task_name = args_cli.task.split(":")[-1]
     train_task_name = task_name.replace("-Play", "")
 
-    # override configurations with non-hydra CLI arguments
     agent_cfg: RslRlBaseRunnerCfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
 
@@ -106,7 +109,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     else:
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
-    # Automatically resolve directory path to the latest model_*.pt checkpoint
     if os.path.isdir(resume_path):
         checkpoints = glob.glob(os.path.join(resume_path, "**", "model_*.pt"), recursive=True)
         if not checkpoints:
@@ -124,7 +126,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_dir = os.path.dirname(resume_path)
     env_cfg.log_dir = log_dir
 
-    # create isaac environment
+    if getattr(env_cfg, "events", None) is not None and hasattr(
+        env_cfg.events, "randomize_hidden_belief_obstacles"
+    ):
+        env_cfg.events.randomize_hidden_belief_obstacles = None
+    for obstacle_name in ("belief_obstacle", "belief_obstacle_05", "belief_obstacle_10", "belief_obstacle_15"):
+        if hasattr(env_cfg.scene, obstacle_name):
+            setattr(env_cfg.scene, obstacle_name, None)
+
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
     if isinstance(env.unwrapped, DirectMARLEnv):
@@ -154,18 +163,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         except AttributeError:
             policy_nn = runner.alg.actor_critic
     elif agent_cfg.class_name in ("DistillationRunner", "NativeDistillationRunner"):
-        try:
-            from QuadrupedSpider.models.belief_actor import StudentActorCritic
-            student_cls = StudentActorCritic
-        except ImportError:
-            from QuadrupedSpider.models.belief_actor import MikiBeliefStudent
-            student_cls = MikiBeliefStudent
-
         student_cfg = agent_cfg.policy.to_dict() if hasattr(agent_cfg.policy, "to_dict") else dict(agent_cfg.policy)
         student_cfg.pop("class_name", None)
 
-        policy_nn = student_cls(
+        policy_nn = StudentActorCritic(
             num_actions=env.num_actions,
+            obs=env.get_observations(),
             **student_cfg,
         ).to(agent_cfg.device)
 
@@ -181,13 +184,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 clean_k = clean_k[len("policy."):]
             cleaned_state_dict[clean_k] = v
 
-        policy_nn.load_state_dict(cleaned_state_dict, strict=False)
+        policy_nn.load_state_dict(cleaned_state_dict, strict=True)
         policy_nn.eval()
-
-        if hasattr(policy_nn, "act_inference"):
-            policy = lambda x: policy_nn.act_inference(x)
-        else:
-            policy = lambda x: policy_nn(x)
+        policy = policy_nn.act_inference
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
 

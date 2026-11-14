@@ -13,12 +13,13 @@ from . import mdp as custom_mdp
 class StudentObservationsCfg:
     @configclass
     class ProprioceptionCfg(ObsGroup):
-        """Proprioceptive measurements (45 dimensions)."""
+        """Proprioceptive inputs (57 dims)."""
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel, scale=0.25, clip=(-100.0, 100.0))
         projected_gravity = ObsTerm(func=mdp.projected_gravity, clip=(-100.0, 100.0))
         velocity_commands = ObsTerm(func=mdp.generated_commands, params={"command_name": "base_velocity"})
         joint_pos = ObsTerm(func=mdp.joint_pos_rel, clip=(-100.0, 100.0))
         joint_vel = ObsTerm(func=mdp.joint_vel_rel, scale=0.05, clip=(-100.0, 100.0))
+        joint_effort = ObsTerm(func=mdp.joint_effort, scale=0.05, clip=(-100.0, 100.0))
         actions = ObsTerm(func=mdp.last_action, clip=(-100.0, 100.0))
 
         def __post_init__(self) -> None:
@@ -28,14 +29,15 @@ class StudentObservationsCfg:
 
     @configclass
     class ExteroceptionCfg(ObsGroup):
-        """Corrupted height scan for the student belief encoder (121 dimensions)."""
-        noisy_height_scan = ObsTerm(
+        """corrupted 4x52 foot-centered height scan (208 dims)."""
+        noisy_height_grid = ObsTerm(
             func=custom_mdp.corrupted_height_scan,
             params={
                 "sensor_cfg": SceneEntityCfg("height_scanner"),
-                "noise_std": 0.01,      # Gaussian noise with std dev of x meters
-                "dropout_prob": 0.2,   # % chance per ray to be dropped
-                "blackout_prob": 0.0,  # % chance per step to be completely blind
+                "robot_cfg": SceneEntityCfg("robot"),
+                "noise_std": 0.005,
+                "dropout_prob": 0.03,
+                "blackout_prob": 0.02,
             },
             clip=(-1.0, 1.0),
         )
@@ -46,12 +48,14 @@ class StudentObservationsCfg:
             self.history_length = 0
 
     @configclass
-    class PrivilegedCfg(ObsGroup):
-        """Clean height scan and linear velocity for distillation targets (124 dimensions)."""
-        base_lin_vel = ObsTerm(func=mdp.base_lin_vel, clip=(-100.0, 100.0))
-        clean_height_scan = ObsTerm(
-            func=mdp.height_scan,
-            params={"sensor_cfg": SceneEntityCfg("height_scanner")},
+    class TeacherExteroceptionCfg(ObsGroup):
+        """Contact-corrected 4x52 foot height scan (208 dims) used as reconstruction target."""
+        contact_corrected_height_grid = ObsTerm(
+            func=custom_mdp.contact_aware_foot_height_scan,
+            params={
+                "sensor_cfg": SceneEntityCfg("height_scanner"),
+                "robot_cfg": SceneEntityCfg("robot"),
+            },
             clip=(-1.0, 1.0),
         )
 
@@ -60,10 +64,19 @@ class StudentObservationsCfg:
             self.concatenate_terms = True
             self.history_length = 0
 
-    # Group assignments for Isaac Lab manager and RSL-RL
-    policy: ProprioceptionCfg = ProprioceptionCfg()
+    @configclass
+    class PrivilegedCfg(ObsGroup):
+        """Privileged physical state (base_lin_vel)."""
+        base_lin_vel = ObsTerm(func=mdp.base_lin_vel, clip=(-100.0, 100.0))
+
+        def __post_init__(self) -> None:
+            self.enable_corruption = False
+            self.concatenate_terms = True
+            self.history_length = 0
+
     proprioception: ProprioceptionCfg = ProprioceptionCfg()
     exteroception: ExteroceptionCfg = ExteroceptionCfg()
+    teacher_exteroception: TeacherExteroceptionCfg = TeacherExteroceptionCfg()
     privileged: PrivilegedCfg = PrivilegedCfg()
 
 

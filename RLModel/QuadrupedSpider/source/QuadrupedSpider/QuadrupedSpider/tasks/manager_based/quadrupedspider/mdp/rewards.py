@@ -33,7 +33,6 @@ def joint_effort_above_continuous_limit(
     """Penalize joint efforts that exceed a specified continuous limit."""
     asset = env.scene[asset_cfg.name]
     
-    # Change 'applied_effort' to 'applied_torque'
     efforts = torch.abs(asset.data.applied_torque)
     
     excess = torch.clamp(efforts - limit, min=0.0)

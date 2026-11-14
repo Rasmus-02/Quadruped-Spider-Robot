@@ -4,23 +4,27 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from isaaclab.utils import configclass
-
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
 
 
 @configclass
 class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 16
-    max_iterations = 10000
-    save_interval = 50
-    experiment_name = "QuadrupedSpider"
+    max_iterations = 50000
+    save_interval = 250
+    experiment_name = "QuadrupedSpider-PrivilegedTeacher"
+    obs_groups = {
+        "policy": ["proprioception", "exteroception", "privileged"],
+        "critic": ["proprioception", "exteroception", "privileged"],
+    }
     policy = RslRlPpoActorCriticCfg(
-        init_noise_std=1.0,
-        actor_obs_normalization=False,
-        critic_obs_normalization=False,
-        actor_hidden_dims=[512, 256, 128],
+        class_name="TeacherActorCritic",
+        init_noise_std=0.8,
+        actor_obs_normalization=True,
+        critic_obs_normalization=True,
+        actor_hidden_dims=[256, 160, 128],
         critic_hidden_dims=[512, 256, 128],
-        activation="elu",
+        activation="leaky_relu",
     )
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,
@@ -29,7 +33,7 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         entropy_coef=0.005,
         num_learning_epochs=5,
         num_mini_batches=4,
-        learning_rate=1.0e-3,
+        learning_rate=5.0e-4,
         schedule="adaptive",
         gamma=0.99,
         lam=0.95,

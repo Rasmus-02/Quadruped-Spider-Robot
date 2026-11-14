@@ -5,12 +5,12 @@
 
 import math
 
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
 from isaaclab.sensors import RayCasterCfg, patterns
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
-from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg, mdp
 from isaaclab.envs.mdp import UniformVelocityCommandCfg
 from isaaclab.managers import EventTermCfg as EventTerm
@@ -94,12 +94,26 @@ class QuadrupedspiderSceneCfg(InteractiveSceneCfg):
     # Robot articulation
     robot: ArticulationCfg = QUADRUPED_SPIDER_BASE_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
-    # LiDAR RayCaster sensor to scan the ground
+    # Single reusable collision block per env (excluded from height_scanner.mesh_prim_paths)
+    belief_obstacle = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/BeliefObstacle",
+        spawn=sim_utils.CuboidCfg(
+            size=(0.36, 0.46, 0.15),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=True,
+                disable_gravity=True,
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, -2.0)),
+    )
+
+    # LiDAR RayCaster sensor to scan the ground (2.0m x 2.0m at 0.1m spacing -> 21x21 = 441 rays)
     height_scanner = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/base_link",
         offset=RayCasterCfg.OffsetCfg(pos=(-0.1, 0.0, 0.0)),
         ray_alignment="yaw",
-        pattern_cfg=patterns.GridPatternCfg(size=(1.3, 1.3), resolution=0.13),
+        pattern_cfg=patterns.GridPatternCfg(size=(2.0, 2.0), resolution=0.1),
         debug_vis=False,
         mesh_prim_paths=["/World/ground"],
     )
@@ -109,8 +123,8 @@ class QuadrupedspiderSceneCfg(InteractiveSceneCfg):
         offset=RayCasterCfg.OffsetCfg(pos=(-0.1, 0.0, 0.0)),
         ray_alignment="world",
         pattern_cfg=patterns.GridPatternCfg(size=(0.0, 0.0), resolution=1.0),
-        debug_vis=True,
-        mesh_prim_paths=["/World/ground"],  # Bypasses the robot collision meshes
+        debug_vis=False,
+        mesh_prim_paths=["/World/ground"],
     )
 
     # Ambient lighting
@@ -118,6 +132,7 @@ class QuadrupedspiderSceneCfg(InteractiveSceneCfg):
         prim_path="/World/DomeLight",
         spawn=sim_utils.DomeLightCfg(color=(0.9, 0.9, 0.9), intensity=500.0),
     )
+
 
 # =====================================================================================
 # MDP settings
@@ -172,7 +187,6 @@ class ObservationsCfg:
 class EventCfg:
     """Configuration for events."""
 
-    # Reset root base (pose and orientation)
     reset_base = EventTerm(
         func=mdp.reset_root_state_uniform,
         mode="reset",
@@ -183,7 +197,6 @@ class EventCfg:
         },
     )
 
-    # Reset joint positions with slight initial offset
     reset_robot_joints = EventTerm(
         func=mdp.reset_joints_by_offset,
         mode="reset",
@@ -191,6 +204,22 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg("robot", joint_names=[".*Motor"]),
             "position_range": (-0.05, 0.05),
             "velocity_range": (0.0, 0.0),
+        },
+    )
+
+    reset_contact_belief_map = EventTerm(
+        func=custom_mdp.reset_contact_belief_map,
+        mode="reset",
+    )
+
+    # Invisible obstacles, only sensed by proprioception
+    randomize_hidden_belief_obstacles = EventTerm(
+        func=custom_mdp.randomize_hidden_belief_obstacles,
+        mode="reset",
+        params={
+            "active_probability": 0.65,
+            "x_range": (0.35, 0.90),
+            "y_range": (-0.30, 0.30),
         },
     )
 
@@ -202,10 +231,10 @@ class CommandsCfg:
     base_velocity = UniformVelocityCommandCfg(
         asset_name="robot",
         resampling_time_range=(2.5, 5.0),
-        rel_standing_envs=0.1,
+        rel_standing_envs=0.05,
         rel_heading_envs=0.0,
         heading_command=False,
-        debug_vis=True,
+        debug_vis=False,
         ranges=UniformVelocityCommandCfg.Ranges(
             lin_vel_x=(-1.0, 1.0),
             lin_vel_y=(-1.0, 1.0),
@@ -219,10 +248,10 @@ class RewardsCfg:
     """Reward terms for the MDP."""
 
     # Survival status
-    alive = RewTerm(func=mdp.is_alive, weight=1.0)
+    alive = RewTerm(func=mdp.is_alive, weight=0.25)
     terminating = RewTerm(func=mdp.is_terminated, weight=-3.0)
 
-    # Velocity trackinhg
+    # Velocity tracking
     track_lin_vel_xy_exp = RewTerm(
         func=mdp.track_lin_vel_xy_exp,
         weight=5.0,
@@ -230,7 +259,7 @@ class RewardsCfg:
     )
     track_ang_vel_z_exp = RewTerm(
         func=mdp.track_ang_vel_z_exp,
-        weight=2.5,
+        weight=2.0,
         params={"command_name": "base_velocity", "std": 0.35, "asset_cfg": SceneEntityCfg("robot")},
     )
 
@@ -244,26 +273,26 @@ class RewardsCfg:
     )
     # Large action commands
     action_l2 = RewTerm(
-        func=mdp.action_l2, 
-        weight=-0.015
+        func=mdp.action_l2,
+        weight=-0.015,
     )
     # Penalize joints exceeding the 5 Nm continuous rating
     continuous_torque_limit = RewTerm(
         func=custom_mdp.joint_effort_above_continuous_limit,
         weight=-0.005,
-        params={"limit": 5.0, "asset_cfg": SceneEntityCfg("robot")}
+        params={"limit": 5.0, "asset_cfg": SceneEntityCfg("robot")},
     )
     # Penalize joint torque
     joint_torques_l2 = RewTerm(
         func=mdp.joint_torques_l2,
         weight=-0.00002,
-        params={"asset_cfg": SceneEntityCfg("robot")}
+        params={"asset_cfg": SceneEntityCfg("robot")},
     )
     # Penalize joints getting too close to their physical limits
     joint_limits = RewTerm(
         func=mdp.joint_pos_limits,
         weight=-0.1,
-        params={"asset_cfg": SceneEntityCfg("robot")}
+        params={"asset_cfg": SceneEntityCfg("robot")},
     )
     # IMU Gyro penalty: Penalize roll and pitch rotation rates
     ang_vel_xy_l2 = RewTerm(
@@ -275,7 +304,7 @@ class RewardsCfg:
         func=mdp.flat_orientation_l2,
         weight=-1.0,
         params={"asset_cfg": SceneEntityCfg("robot")},
-    )    
+    )
     # Smoothness regularization (Prevents jittery movement)
     action_rate = RewTerm(
         func=mdp.action_rate_l2,
@@ -292,7 +321,7 @@ class TerminationsCfg:
 
     # Drop termination
     base_height = DoneTerm(
-        func=custom_mdp.tof_distance_below_minimum,  # Point this to your new function
+        func=custom_mdp.tof_distance_below_minimum,
         params={"minimum_distance": 0.18, "sensor_cfg": SceneEntityCfg("tof_sensor")},
     )
 
@@ -336,3 +365,4 @@ class QuadrupedspiderEnvCfg(ManagerBasedRLEnvCfg):
         # Simulation physics stepping (120 Hz PhysX / 30 Hz policy)
         self.sim.dt = 1 / 120
         self.sim.render_interval = self.decimation
+        self.sim.physx.enable_external_forces_every_iteration = True

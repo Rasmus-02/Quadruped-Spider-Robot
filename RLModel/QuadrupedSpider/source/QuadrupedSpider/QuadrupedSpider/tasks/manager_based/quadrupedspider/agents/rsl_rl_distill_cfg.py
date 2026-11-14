@@ -15,36 +15,34 @@ class QuadrupedSpiderDistillRunnerCfg(RslRlBaseRunnerCfg):
     resume = False
     load_run = ".*"
     load_checkpoint = "model_.*.pt"
+    teacher_checkpoint = None
 
     obs_groups = {
-        "policy": ["policy"],
-        "critic": ["policy"],
+        "policy": ["proprioception"],
+        "critic": ["proprioception"],
         "proprioception": ["proprioception"],
         "exteroception": ["exteroception"],
+        "teacher_exteroception": ["teacher_exteroception"],
         "privileged": ["privileged"],
     }
-    
+
     @configclass
     class AlgorithmCfg:
         class_name = "BeliefDistillationAlgorithm"
         lambda_bc = 1.0
         lambda_rec = 0.5
-        prop_dim = 45
+        sequence_length = 10
         learning_rate = 5e-4
-        num_learning_epochs = 5
+        num_learning_epochs = 2
         max_grad_norm = 1.0
 
     @configclass
     class PolicyCfg:
         class_name = "StudentActorCritic"
-        prop_dim = 45
-        priv_dim = 124
-        latent_dim = 64
-        rnn_hidden_dim = 256
+        rnn_hidden_dim = 50
         rnn_num_layers = 2
-        student_hidden_dims = [512, 256, 128]
-        teacher_hidden_dims = [512, 256, 128]
-        activation = "elu"
+        student_hidden_dims = [256, 160, 128]
+        activation = "leaky_relu"
 
     algorithm = AlgorithmCfg()
     policy = PolicyCfg()

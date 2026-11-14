@@ -29,7 +29,7 @@ It allows you to develop in an isolated environment, outside of the core Isaac L
 
     - Listing the available tasks:
 
-        Note: It the task name changes, it may be necessary to update the search pattern `"Template-"`
+        Note: If the task name changes, it may be necessary to update the search pattern `"Template-"`
         (in the `scripts/list_envs.py` file) so that it can be listed.
 
         ```bash
@@ -71,6 +71,51 @@ To setup the IDE, please follow these instructions:
 If everything executes correctly, it should create a file .python.env in the `.vscode` directory.
 The file contains the python paths to all the extensions provided by Isaac Sim and Omniverse.
 This helps in indexing all the python modules for intelligent suggestions while writing code.
+
+### Train the privileged teacher and belief-state student
+
+Train a new teacher first. The teacher task observes proprioception, foot-contact points, and
+a persistent terrain map that combines the ground-only height scan with contact corrections.
+It writes runs under `logs/rsl_rl/QuadrupedSpider-PrivilegedTeacher`:
+
+```bash
+/path/to/IsaacLab/isaaclab.sh -p scripts/rsl_rl/train.py \
+    --task Isaac-QuadrupedSpider-Teacher-v0 \
+    --run_name privileged
+```
+
+After the teacher has converged, train a fresh student. The training script selects the
+latest teacher checkpoint whose input matches the current proprioception-plus-privileged
+observation size; a proprioception-only legacy checkpoint is rejected:
+
+```bash
+/path/to/IsaacLab/isaaclab.sh -p scripts/rsl_rl/train.py \
+    --task Isaac-QuadrupedSpider-Student-v0 \
+    --run_name belief_student
+```
+
+The sensor casts a 31x31, 2.4m x 2.4m grid against `/World/ground` only. Contact sensors do not
+make objects visible to that scanner: they report foot contact locations and forces. The
+environment registers the scan in a rolling world-coordinate map, inserts measured contact
+heights, and retains those contact-derived cells as the robot moves. The map is cleared on
+episode reset. During teacher and student training, half of episode resets place one
+collision-enabled 5, 10, or 15 cm block in the robot's path; these blocks are not included in the
+raycaster targets. Play scripts disable these training props so a separately placed,
+sensor-invisible cube remains a held-out test.
+
+The student receives this full grid with simulated noise, dropouts, and blackouts, plus
+proprioception including joint effort (so contact cues can be estimated from onboard-like signals,
+not simulator contact labels). A recurrent encoder maintains the student's
+belief and decodes a full-grid perceived map. Distillation trains its actions against the
+teacher and its map against the persistent contact-corrected target. In `controll.py`, red dots
+show the current raw ground scan and green dots show the student's predicted map. An obstacle
+that the scanner cannot see should therefore appear in green only after the foot contacts it,
+and should remain in the map after the foot leaves.
+
+Both teacher and student checkpoints must be retrained after this observation/model change.
+Older checkpoints are not compatible with the new input and output dimensions. The contact-map
+behavior is an adaptation inspired by Miki et al.; it still requires a live simulation benchmark
+with an opaque-to-scan obstacle to verify contact height accuracy and retention.
 
 ### Setup as Omniverse Extension (Optional)
 

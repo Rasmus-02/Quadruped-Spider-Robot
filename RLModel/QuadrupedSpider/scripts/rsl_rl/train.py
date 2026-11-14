@@ -83,7 +83,9 @@ from datetime import datetime
 
 import gymnasium as gym
 import torch
-from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+import yaml
+from rsl_rl.runners import OnPolicyRunner
+import rsl_rl.runners.on_policy_runner as opr
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -105,8 +107,9 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 logger = logging.getLogger(__name__)
 
 import QuadrupedSpider.tasks  # noqa: F401
-from rsl_rl.modules import ActorCritic
-from QuadrupedSpider.models import NativeDistillationRunner
+from QuadrupedSpider.models import NativeDistillationRunner, TeacherActorCritic
+
+opr.TeacherActorCritic = TeacherActorCritic
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -114,10 +117,13 @@ torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 
 
-def get_latest_teacher_checkpoint() -> str:
-    teacher_dir = os.path.abspath(os.path.join("logs", "rsl_rl", "QuadrupedSpider"))
+def get_latest_teacher_checkpoint(expected_extero_dim: int) -> str:
+    teacher_dir = os.path.abspath(os.path.join("logs", "rsl_rl", "QuadrupedSpider-PrivilegedTeacher"))
     if not os.path.exists(teacher_dir):
-        raise FileNotFoundError(f"Teacher directory not found at: {teacher_dir}")
+        raise FileNotFoundError(
+            f"Privileged teacher directory not found at {teacher_dir}. "
+            "Train Isaac-QuadrupedSpider-Teacher-v0 first."
+        )
 
     run_dirs = [
         os.path.join(teacher_dir, d)
@@ -127,66 +133,105 @@ def get_latest_teacher_checkpoint() -> str:
     if not run_dirs:
         raise FileNotFoundError(f"No run directories found inside: {teacher_dir}")
 
-    latest_run_dir = max(run_dirs, key=os.path.getmtime)
-    checkpoints = glob.glob(os.path.join(latest_run_dir, "**", "model_*.pt"), recursive=True)
-    if not checkpoints:
-        checkpoints = glob.glob(os.path.join(latest_run_dir, "*.pt"))
-    if not checkpoints:
-        raise FileNotFoundError(f"No .pt checkpoint files found inside latest run: {latest_run_dir}")
-
     def extract_iter(p):
         base = os.path.basename(p)
         num = "".join(filter(str.isdigit, base))
         return int(num) if num else os.path.getmtime(p)
 
-    return max(checkpoints, key=extract_iter)
+    for run_dir in sorted(run_dirs, key=os.path.getmtime, reverse=True):
+        checkpoints = glob.glob(os.path.join(run_dir, "**", "model_*.pt"), recursive=True)
+        if not checkpoints:
+            checkpoints = glob.glob(os.path.join(run_dir, "*.pt"))
+        for checkpoint_path in sorted(checkpoints, key=extract_iter, reverse=True):
+            checkpoint = torch.load(checkpoint_path, map_location="cpu")
+            state_dict = checkpoint.get("model_state_dict", checkpoint)
+            extero_w = state_dict.get("extero_encoder.net.0.weight")
+            if extero_w is not None and extero_w.shape[1] * 4 == expected_extero_dim:
+                return checkpoint_path
+
+    raise FileNotFoundError(
+        f"No TeacherActorCritic checkpoint with extero_dim={expected_extero_dim} found under "
+        f"{teacher_dir}. Train the teacher task with the current observation config."
+    )
+
+
+def load_teacher_policy(checkpoint_path: str, obs: dict, num_actions: int, device: str) -> TeacherActorCritic:
+    """Load a TeacherActorCritic using its saved network config."""
+    run_dir = os.path.dirname(checkpoint_path)
+    if os.path.basename(run_dir) == "exported":
+        run_dir = os.path.dirname(run_dir)
+    agent_cfg_path = os.path.join(run_dir, "params", "agent.yaml")
+    if not os.path.isfile(agent_cfg_path):
+        raise FileNotFoundError(
+            f"Teacher config not found at {agent_cfg_path}. Select a checkpoint from a saved training run."
+        )
+
+    with open(agent_cfg_path, encoding="utf-8") as agent_cfg_file:
+        teacher_cfg = yaml.safe_load(agent_cfg_file)
+    policy_cfg = teacher_cfg.get("policy", {})
+    if not isinstance(policy_cfg, dict):
+        raise ValueError(f"Teacher policy config in {agent_cfg_path} is missing or invalid.")
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+
+    teacher_obs_groups = ["proprioception", "exteroception", "privileged"]
+    teacher_policy = TeacherActorCritic(
+        obs=obs,
+        obs_groups={
+            "policy": teacher_obs_groups,
+            "critic": teacher_obs_groups,
+        },
+        num_actions=num_actions,
+        actor_hidden_dims=policy_cfg.get("actor_hidden_dims", [256, 160, 128]),
+        critic_hidden_dims=policy_cfg.get("critic_hidden_dims", [512, 256, 128]),
+        activation=policy_cfg.get("activation", "leaky_relu"),
+        actor_obs_normalization=policy_cfg.get("actor_obs_normalization", True),
+        critic_obs_normalization=policy_cfg.get("critic_obs_normalization", True),
+    ).to(device)
+    teacher_policy.load_state_dict(state_dict)
+    teacher_policy.eval()
+    teacher_policy.requires_grad_(False)
+    print(
+        f"[INFO]: Teacher architecture loaded from {agent_cfg_path}, "
+        f"using observation groups {teacher_obs_groups}."
+    )
+    return teacher_policy
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Train with RSL-RL agent."""
-    # override configurations with non-hydra CLI arguments
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     agent_cfg.max_iterations = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
     )
 
-    # set the environment seed
-    # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
-    # check for invalid combination of CPU device with distributed training
     if args_cli.distributed and args_cli.device is not None and "cpu" in args_cli.device:
         raise ValueError(
             "Distributed training is not supported when using CPU device. "
             "Please use GPU device (e.g., --device cuda) for distributed training."
         )
 
-    # multi-gpu training configuration
     if args_cli.distributed:
         env_cfg.sim.device = f"cuda:{app_launcher.local_rank}"
         agent_cfg.device = f"cuda:{app_launcher.local_rank}"
-
-        # set seed to have diversity in different threads
         seed = agent_cfg.seed + app_launcher.local_rank
         env_cfg.seed = seed
         agent_cfg.seed = seed
 
-    # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
-    # specify directory for logging runs: {time-stamp}_{run_name}
     log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    # The Ray Tune workflow extracts experiment name using the logging line below, hence, do not
-    # change it (see PR #2346, comment-2819298849)
     print(f"Exact experiment name requested from command line: {log_dir}")
     if agent_cfg.run_name:
         log_dir += f"_{agent_cfg.run_name}"
     log_dir = os.path.join(log_root_path, log_dir)
 
-    # set the IO descriptors export flag if requested
     if isinstance(env_cfg, ManagerBasedRLEnvCfg):
         env_cfg.export_io_descriptors = args_cli.export_io_descriptors
     else:
@@ -194,17 +239,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "IO descriptors are only supported for manager based RL environments. No IO descriptors will be exported."
         )
 
-    # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
 
-    # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
-    # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
 
-    # save resume path for student policy resuming
     if hasattr(args_cli, "checkpoint") and args_cli.checkpoint:
         resume_path = args_cli.checkpoint
     elif agent_cfg.resume:
@@ -212,7 +253,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     else:
         resume_path = None
 
-    # wrap for video recording
     if args_cli.video:
         video_kwargs = {
             "video_folder": os.path.join(log_dir, "videos", "train"),
@@ -236,31 +276,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     elif agent_cfg.class_name == "DistillationRunner":
         teacher_checkpoint_path = getattr(agent_cfg, "teacher_checkpoint", None)
+        obs = env.get_observations()
+        expected_extero_dim = int(obs["exteroception"].shape[-1])
         if not teacher_checkpoint_path:
-            teacher_checkpoint_path = get_latest_teacher_checkpoint()
+            teacher_checkpoint_path = get_latest_teacher_checkpoint(expected_extero_dim)
 
         print(f"[INFO]: Dynamically loading frozen teacher checkpoint from: {teacher_checkpoint_path}")
 
-        obs = env.get_observations()
-
-        teacher_obs_groups = ["proprioception", "privileged"]
-        teacher_policy = ActorCritic(
+        teacher_policy = load_teacher_policy(
+            checkpoint_path=teacher_checkpoint_path,
             obs=obs,
-            obs_groups={
-                "policy": teacher_obs_groups,
-                "critic": teacher_obs_groups,
-            },
             num_actions=env.num_actions,
-            actor_hidden_dims=[512, 256, 128],
-            critic_hidden_dims=[512, 256, 128],
-            activation="elu",
-            actor_obs_normalization=False,
-            critic_obs_normalization=False,
-        ).to(agent_cfg.device)
+            device=agent_cfg.device,
+        )
 
-        loaded_dict = torch.load(teacher_checkpoint_path, map_location=agent_cfg.device)
-        teacher_policy.load_state_dict(loaded_dict["model_state_dict"])
-        
         runner = NativeDistillationRunner(
             env=env,
             train_cfg=agent_cfg.to_dict(),
@@ -273,25 +302,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             runner.load(resume_path, load_optimizer=True)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
-    
-    # write git state to logs
+
     runner.add_git_repo_to_log(__file__)
 
-    # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
 
-    # run training
     runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
 
     print(f"Training time: {round(time.time() - start_time, 2)} seconds")
 
-    # close the simulator
     env.close()
 
 
 if __name__ == "__main__":
-    # run the main function
     main()
-    # close sim app
     simulation_app.close()

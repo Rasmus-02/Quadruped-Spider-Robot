@@ -30,6 +30,11 @@ parser.add_argument("--video_length", type=int, default=200, help="Length of the
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
+parser.add_argument(
+    "--disable_scan_corruption",
+    action="store_true",
+    help="Disable student scan noise, dropouts, and blackouts for terrain-visualization diagnosis.",
+)
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
@@ -72,6 +77,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Joy
 import torch
 from rsl_rl.runners import OnPolicyRunner
+import rsl_rl.runners.on_policy_runner as opr
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -94,6 +100,11 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import QuadrupedSpider.tasks  # noqa: F401
+from QuadrupedSpider.models import StudentActorCritic, TeacherActorCritic
+
+from QuadrupedSpider.tasks.manager_based.quadrupedspider.mdp.observations import foot_height_sample_positions
+
+opr.TeacherActorCritic = TeacherActorCritic
 
 
 class RosTeleopNode(Node):
@@ -108,25 +119,23 @@ class RosTeleopNode(Node):
         self.joy_sub = self.create_subscription(Joy, "/joy", self._joy_callback, 10)
 
     def _cmd_vel_callback(self, msg: Twist):
-        max_lin_vel = 1.5  # m/s
-        max_ang_vel = 2.0  # rad/s
-        self.cmd_vel = [float(msg.linear.x) * max_lin_vel,  # X Velocity
-                        float(msg.linear.y) * max_lin_vel,  # Y Velocity
-                        float(msg.angular.z) * max_ang_vel] # Z Rotation
+        max_lin_vel = 1.5
+        max_ang_vel = 2.0
+        self.cmd_vel = [
+            float(msg.linear.x) * max_lin_vel,
+            float(msg.linear.y) * max_lin_vel,
+            float(msg.angular.z) * max_ang_vel,
+        ]
 
     def _joy_callback(self, msg: Joy):
-        # Button index 0 is 'A' on Xbox one controller
         if len(msg.buttons) > 0 and msg.buttons[0] == 1:
             self.reset_requested = True
 
         if len(msg.axes) >= 4:
-            # Left stick: velocity
             lin_x = float(msg.axes[1])
             lin_y = float(msg.axes[0])
-            # Right stick: rotation
             ang_z = float(msg.axes[3])
 
-            # Deadzone
             deadzone = 0.08
             lin_x = 0.0 if abs(lin_x) < deadzone else lin_x
             lin_y = 0.0 if abs(lin_y) < deadzone else lin_y
@@ -148,12 +157,28 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
-    # Keep robot alive indefinitely during play
+    if args_cli.disable_scan_corruption:
+        try:
+            scan_term = env_cfg.observations.exteroception.noisy_height_grid
+        except AttributeError as exc:
+            raise ValueError(
+                "--disable_scan_corruption requires the student noisy_height_grid observation."
+            ) from exc
+        scan_term.params.update(noise_std=0.0, dropout_prob=0.0, blackout_prob=0.0)
+        env_cfg.observations.exteroception.enable_corruption = False
+        print("[INFO] Student scan corruption disabled for this play session.")
+
     env_cfg.episode_length_s = 1e6
     if hasattr(env_cfg, "terminations"):
         env_cfg.terminations = None
+    if getattr(env_cfg, "events", None) is not None and hasattr(
+        env_cfg.events, "randomize_hidden_belief_obstacles"
+    ):
+        env_cfg.events.randomize_hidden_belief_obstacles = None
+    for obstacle_name in ("belief_obstacle", "belief_obstacle_05", "belief_obstacle_10", "belief_obstacle_15"):
+        if hasattr(env_cfg.scene, obstacle_name):
+            setattr(env_cfg.scene, obstacle_name, None)
 
-    # Locate checkpoint
     log_root_path = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
     if args_cli.use_pretrained_checkpoint:
@@ -166,7 +191,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     else:
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
-    # Automatically resolve directory path to the latest model_*.pt checkpoint
     if os.path.isdir(resume_path):
         checkpoints = glob.glob(os.path.join(resume_path, "**", "model_*.pt"), recursive=True)
         if not checkpoints:
@@ -184,7 +208,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_dir = os.path.dirname(resume_path)
     env_cfg.log_dir = log_dir
 
-    # Initialize Environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
     if isinstance(env.unwrapped, DirectMARLEnv):
@@ -213,18 +236,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         except AttributeError:
             policy_nn = runner.alg.actor_critic
     elif agent_cfg.class_name in ("DistillationRunner", "NativeDistillationRunner"):
-        try:
-            from QuadrupedSpider.models.belief_actor import StudentActorCritic
-            student_cls = StudentActorCritic
-        except ImportError:
-            from QuadrupedSpider.models.belief_actor import MikiBeliefStudent
-            student_cls = MikiBeliefStudent
-
         student_cfg = agent_cfg.policy.to_dict() if hasattr(agent_cfg.policy, "to_dict") else dict(agent_cfg.policy)
         student_cfg.pop("class_name", None)
 
-        policy_nn = student_cls(
+        policy_nn = StudentActorCritic(
             num_actions=env.num_actions,
+            obs=env.get_observations(),
             **student_cfg,
         ).to(agent_cfg.device)
 
@@ -240,41 +257,34 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 clean_k = clean_k[len("policy."):]
             cleaned_state_dict[clean_k] = v
 
-        policy_nn.load_state_dict(cleaned_state_dict, strict=False)
+        policy_nn.load_state_dict(cleaned_state_dict, strict=True)
         policy_nn.eval()
-
-        if hasattr(policy_nn, "act_inference"):
-            policy = lambda x: policy_nn.act_inference(x)
-        else:
-            policy = lambda x: policy_nn(x)
+        policy = policy_nn.act_inference
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
 
-    # Belief Reconstructed Terrain Visualizer (Green spheres)
     belief_marker_cfg = VisualizationMarkersCfg(
         prim_path="/Visuals/BeliefTerrain",
         markers={
             "points": sim_utils.SphereCfg(
-                radius=0.03,
+                radius=0.01,
                 visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.1, 1.0, 0.2)),
             ),
         },
     )
     belief_visualizer = VisualizationMarkers(belief_marker_cfg)
 
-    # Raw Sensor Observation Visualizer (Red spheres)
     raw_sensor_marker_cfg = VisualizationMarkersCfg(
         prim_path="/Visuals/RawSensorTerrain",
         markers={
             "points": sim_utils.SphereCfg(
-                radius=0.02,
+                radius=0.01,
                 visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.15, 0.15)),
             ),
         },
     )
     raw_visualizer = VisualizationMarkers(raw_sensor_marker_cfg)
 
-    # ROS 2 node initialization
     if not rclpy.ok():
         rclpy.init()
     ros_node = RosTeleopNode()
@@ -292,15 +302,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     dt = env.unwrapped.step_dt
     obs = env.get_observations()
     loop_step = 0
+    scan_offset = 0.35
 
     while simulation_app.is_running():
         start_time = time.time()
 
-        # Spin ROS events non-blockingly
         rclpy.spin_once(ros_node, timeout_sec=0.0)
 
         with torch.inference_mode():
-            # Manual reset triggered by Xbox button A
             if ros_node.reset_requested:
                 print("[TELEOP] Button A pressed -> Resetting robot!")
                 ros_node.reset_requested = False
@@ -310,12 +319,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     policy_nn.reset()
                 obs = env.get_observations()
 
-            # Push velocity command into Isaac Lab manager buffer
             cmd_tensor = torch.tensor(ros_node.cmd_vel, dtype=torch.float32, device=env.unwrapped.device)
             if command_term is not None:
                 command_term.command[:] = cmd_tensor.repeat(env.unwrapped.num_envs, 1)
 
-            # Force velocity_commands slice inside obs before calling policy
             if hasattr(obs, "keys"):
                 if "proprioception" in obs.keys():
                     obs["proprioception"][:, 6:9] = cmd_tensor
@@ -324,59 +331,156 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             elif isinstance(obs, torch.Tensor):
                 obs[:, 6:9] = cmd_tensor
 
-            # Step policy & physics
             actions = policy(obs)
+
+            terrain_diagnostic = None
+            if "height_scanner" in env.unwrapped.scene.sensors:
+                sensor = env.unwrapped.scene.sensors["height_scanner"]
+                sensor_pos_z = sensor.data.pos_w[0, 2]
+
+                noisy_scan = (
+                    obs["exteroception"][0]
+                    if hasattr(obs, "keys") and "exteroception" in obs
+                    else None
+                )
+                sample_positions = foot_height_sample_positions(env.unwrapped)[0].reshape(-1, 3)
+
+                if noisy_scan is not None and sample_positions is not None:
+                    valid_scan = (
+                        torch.isfinite(noisy_scan)
+                        & (noisy_scan < 1.0)
+                        & torch.isfinite(sample_positions).all(dim=-1)
+                    )
+                    if valid_scan.any():
+                        world_points_raw = sample_positions[valid_scan].clone()
+                        world_points_raw[:, 2] = sensor_pos_z - noisy_scan[valid_scan] - scan_offset
+                        raw_visualizer.set_visibility(True)
+                        raw_visualizer.visualize(translations=world_points_raw)
+                    else:
+                        raw_visualizer.set_visibility(False)
+                else:
+                    raw_visualizer.set_visibility(False)
+
+                reconstruction = getattr(policy_nn, "reconstruction", None)
+
+                if reconstruction is not None:
+                    pred_scan = reconstruction[0]
+                    if sample_positions is not None and pred_scan.numel() == sample_positions.shape[0]:
+                        valid_prediction = (
+                            torch.isfinite(pred_scan)
+                            & torch.isfinite(sample_positions).all(dim=-1)
+                        )
+                        if valid_prediction.any():
+                            world_points_belief = sample_positions[valid_prediction].clone()
+                            world_points_belief[:, 2] = (
+                                sensor_pos_z - pred_scan[valid_prediction] - scan_offset
+                            )
+                            belief_visualizer.set_visibility(True)
+                            belief_visualizer.visualize(translations=world_points_belief)
+                        else:
+                            belief_visualizer.set_visibility(False)
+                    else:
+                        belief_visualizer.set_visibility(False)
+
+                    target_group = "teacher_exteroception" if (hasattr(obs, "keys") and "teacher_exteroception" in obs) else "privileged"
+                    if (
+                        noisy_scan is not None
+                        and reconstruction.shape[-1] == noisy_scan.numel()
+                        and hasattr(obs, "keys")
+                        and target_group in obs
+                    ):
+                        target_scan = obs[target_group][0][-noisy_scan.numel() :]
+                        target_z = sensor_pos_z - target_scan - scan_offset
+                        predicted_z = sensor_pos_z - pred_scan - scan_offset
+                        target_known = torch.isfinite(target_scan) & (target_scan < 1.0)
+                        valid_raw_scan = torch.isfinite(noisy_scan) & (noisy_scan < 1.0)
+                        comparison_mask = valid_raw_scan & target_known
+                        missing_raw_scan = ~valid_raw_scan & target_known
+                        prediction_rmse = (
+                            torch.sqrt(torch.mean((pred_scan[target_known] - target_scan[target_known]).square()))
+                            if target_known.any()
+                            else torch.tensor(float("nan"), device=pred_scan.device)
+                        )
+                        if target_known.any():
+                            predicted_z_range = predicted_z[target_known]
+                            target_z_range = target_z[target_known]
+                            pred_min, pred_max = predicted_z_range.min().item(), predicted_z_range.max().item()
+                            target_min, target_max = target_z_range.min().item(), target_z_range.max().item()
+                        else:
+                            pred_min = pred_max = target_min = target_max = float("nan")
+                        if comparison_mask.any():
+                            raw_rmse = torch.sqrt(
+                                torch.mean(
+                                    (noisy_scan[comparison_mask] - target_scan[comparison_mask]).square()
+                                )
+                            )
+                            valid_raw_rmse = raw_rmse.item()
+                            valid_prediction_rmse = torch.sqrt(
+                                torch.mean(
+                                    (pred_scan[comparison_mask] - target_scan[comparison_mask]).square()
+                                )
+                            ).item()
+                        else:
+                            valid_raw_rmse = float("nan")
+                            valid_prediction_rmse = float("nan")
+                        if missing_raw_scan.any():
+                            missing_prediction_rmse = torch.sqrt(
+                                torch.mean(
+                                    (pred_scan[missing_raw_scan] - target_scan[missing_raw_scan]).square()
+                                )
+                            ).item()
+                        else:
+                            missing_prediction_rmse = float("nan")
+                        dropped_samples = missing_raw_scan.sum().item()
+                        terrain_diagnostic = (
+                            pred_min,
+                            pred_max,
+                            target_min,
+                            target_max,
+                            valid_raw_rmse,
+                            valid_prediction_rmse,
+                            missing_prediction_rmse,
+                            dropped_samples,
+                            noisy_scan.numel(),
+                            prediction_rmse.item(),
+                        )
+                else:
+                    belief_visualizer.set_visibility(False)
+
             obs, _, dones, _ = env.step(actions)
 
-            # Re-apply command tensor immediately after step
             if command_term is not None:
                 command_term.command[:] = cmd_tensor.repeat(env.unwrapped.num_envs, 1)
 
             if hasattr(policy_nn, "reset"):
                 policy_nn.reset(dones)
 
-            # Update visualizers
-            if "height_scanner" in env.unwrapped.scene.sensors:
-                sensor = env.unwrapped.scene.sensors["height_scanner"]
-                sensor_pos_z = sensor.data.pos_w[0, 2]
-                sensor_hits_w = sensor.data.ray_hits_w[0]
-
-                noisy_scan = None
-                if hasattr(obs, "keys"):
-                    if "exteroception" in obs.keys():
-                        noisy_scan = obs["exteroception"][0]
-                    elif "policy" in obs.keys():
-                        p = obs["policy"][0]
-                        if p.shape[-1] >= 166:
-                            noisy_scan = p[45:166]
-                elif isinstance(obs, torch.Tensor) and obs.shape[-1] >= 166:
-                    noisy_scan = obs[0, 45:166]
-
-                if noisy_scan is not None:
-                    world_points_raw = sensor_hits_w.clone()
-                    world_points_raw[:, 2] = sensor_pos_z - noisy_scan - 0.5
-                    raw_visualizer.visualize(translations=world_points_raw)
-
-                reconstruction = getattr(policy_nn, "reconstruction", None)
-                if reconstruction is None and hasattr(policy_nn, "student"):
-                    reconstruction = getattr(policy_nn.student, "last_reconstructed_priv", None)
-                if reconstruction is None:
-                    reconstruction = getattr(policy_nn, "last_reconstructed_priv", None)
-
-                if reconstruction is not None:
-                    if reconstruction.shape[-1] >= 124:
-                        pred_scan = reconstruction[0, 3:124]
-                    else:
-                        pred_scan = reconstruction[0, 3:]
-
-                    world_points_belief = sensor_hits_w.clone()
-                    world_points_belief[:, 2] = sensor_pos_z - pred_scan - 0.5
-                    belief_visualizer.visualize(translations=world_points_belief)
-
             if loop_step % 60 == 0:
                 print(
                     f"[Step {loop_step}] /cmd_vel: [{ros_node.cmd_vel[0]:.2f}, {ros_node.cmd_vel[1]:.2f}, {ros_node.cmd_vel[2]:.2f}] | Action Norm: {torch.norm(actions).item():.3f}"
                 )
+                if terrain_diagnostic is not None:
+                    (
+                        pred_min,
+                        pred_max,
+                        target_min,
+                        target_max,
+                        valid_raw_rmse,
+                        valid_prediction_rmse,
+                        missing_prediction_rmse,
+                        dropped_samples,
+                        total_samples,
+                        prediction_rmse,
+                    ) = terrain_diagnostic
+                    print(
+                        "[Terrain] "
+                        f"predicted world-z=[{pred_min:.2f}, {pred_max:.2f}] m, "
+                        f"contact-corrected target world-z=[{target_min:.2f}, {target_max:.2f}] m, "
+                        f"valid raw/prediction RMSE={valid_raw_rmse:.3f}/{valid_prediction_rmse:.3f} m, "
+                        f"missing prediction RMSE={missing_prediction_rmse:.3f} m, "
+                        f"invalid/dropout samples={dropped_samples}/{total_samples}, "
+                        f"reconstruction RMSE={prediction_rmse:.3f} m"
+                    )
 
         loop_step += 1
         if args_cli.video and loop_step == args_cli.video_length:
