@@ -8,8 +8,8 @@ from pynput import keyboard
 
 JOINT_SPEED = 0.005
 # Degrees of motion (+- range/2)
-HIP_X_RANGE = math.radians(40)
 HIP_Z_RANGE = math.radians(60)
+HIP_X_RANGE = math.radians(40)
 KNEE_X_RANGE = math.radians(30)
 
 SEPERATOR = "\033[96m|\033[0m" # Cyan colored seperators in terminal output
@@ -31,10 +31,10 @@ def on_release(key: keyboard.Key | keyboard.KeyCode | None) -> None:
 
 # Handle keyboard input
 def get_commands() -> tuple[float, float, float]:
-    hip_x = float('w' in pressed_keys) - float('s' in pressed_keys)
     hip_z = float('a' in pressed_keys) - float('d' in pressed_keys)
+    hip_x = float('w' in pressed_keys) - float('s' in pressed_keys)
     knee_x = float('q' in pressed_keys) - float('e' in pressed_keys)
-    return hip_x * JOINT_SPEED, hip_z * JOINT_SPEED, knee_x * JOINT_SPEED
+    return hip_z * JOINT_SPEED, hip_x * JOINT_SPEED, knee_x * JOINT_SPEED
 
 
 def test_pipeline():
@@ -57,23 +57,23 @@ def test_pipeline():
     termios.tcsetattr(fd, termios.TCSADRAIN, new_term)
 
     try:
-        target_hip_x: float = 0.0
         target_hip_z: float = 0.0
+        target_hip_x: float = 0.0
         target_knee_x: float = 0.0
 
         while True:
             t = time.time() - t_start
 
             # Generate Can movement command for motors (+ padding for unconnected motors)
-            h_x, h_z, k_x = get_commands()
+            h_z, h_x, k_x = get_commands()
 
-            target_hip_x = max(-HIP_X_RANGE / 2.0, min(target_hip_x + h_x, HIP_X_RANGE / 2.0))
             target_hip_z = max(-HIP_Z_RANGE / 2.0, min(target_hip_z + h_z, HIP_Z_RANGE / 2.0))
+            target_hip_x = max(-HIP_X_RANGE / 2.0, min(target_hip_x + h_x, HIP_X_RANGE / 2.0))
             target_knee_x = max(-KNEE_X_RANGE / 2.0, min(target_knee_x + k_x, KNEE_X_RANGE / 2.0))
 
             test_positions = np.array([
-                target_hip_x,
                 target_hip_z,
+                target_hip_x,
                 target_knee_x,
                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 # Unused motors
             ], dtype=np.float32)
@@ -84,7 +84,7 @@ def test_pipeline():
             # Read echoed observation
             pos, vel, tau, healthy = controller.get_observation()
 
-            # Print cleanly 5 times per second
+            # Print 5 times per second
             if time.time() - last_print >= 0.2:
                 last_print = time.time()
                 print(f"[Healthy: {healthy}] "
