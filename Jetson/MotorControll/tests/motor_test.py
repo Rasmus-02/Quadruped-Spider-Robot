@@ -27,7 +27,7 @@ def test_pipeline():
             # Read echoed observation
             pos, vel, tau, healthy = controller.get_observation()
 
-            # 3. Print cleanly 5 times per second (using standard newlines)
+            # Print 5 times per second
             if time.time() - last_print >= 0.2:
                 last_print = time.time()
                 print(f"[Healthy: {healthy}] "
