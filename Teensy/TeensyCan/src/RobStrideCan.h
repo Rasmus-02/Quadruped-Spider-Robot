@@ -24,7 +24,8 @@ struct MotorFeedback {
 
 class RobStrideCan {
 public:
-    static const uint8_t TOTAL_MOTORS = 1;
+    static const uint8_t MAX_MOTORS    = 12; // Fixed serial packet size
+    static const uint8_t ACTIVE_MOTORS = 3;  // Number of motors connected atm
     static const uint8_t MASTER_ID = 0xFD;
 
     float default_kp = 25.0f;
@@ -40,7 +41,9 @@ public:
         can2.setMaxMB(16);
 
         delay(50);
-        initActuator(1);
+        for (uint8_t id = 1; id <= ACTIVE_MOTORS; id++) {
+            initActuator(id);
+        }
     }
 
     void update() {
@@ -54,19 +57,19 @@ public:
     }
 
     void enableAll() {
-        for (uint8_t id = 1; id <= TOTAL_MOTORS; id++) {
+        for (uint8_t id = 1; id <= ACTIVE_MOTORS; id++) {
             setMode(id, 0x03);
         }
     }
 
     void disableAll() {
-        for (uint8_t id = 1; id <= TOTAL_MOTORS; id++) {
+        for (uint8_t id = 1; id <= ACTIVE_MOTORS; id++) {
             setMode(id, 0x04);
         }
     }
 
     void setTargetPosition(uint8_t id, float desired_pos, float desired_vel = 0.0f, float ff_torque = 0.0f) {
-        if (id < 1 || id > TOTAL_MOTORS) return;
+        if (id < 1 || id > ACTIVE_MOTORS) return;
 
         CAN_message_t msg;
         msg.flags.extended = 1;
@@ -88,12 +91,12 @@ public:
     }
 
     const MotorFeedback& getFeedback(uint8_t id) const {
-        return feedback[constrain(id, 1, TOTAL_MOTORS) - 1];
+        return feedback[constrain(id, 1, MAX_MOTORS) - 1];
     }
 
     bool isHealthy() const {
         uint32_t now = millis();
-        for (uint8_t i = 0; i < TOTAL_MOTORS; i++) {
+        for (uint8_t i = 0; i < ACTIVE_MOTORS; i++) {
             if (now - feedback[i].last_update_ms > 200) return false;
         }
         return true;
@@ -102,7 +105,7 @@ public:
 private:
     static FlexCAN_T4<CAN1, RX_SIZE_256, TX_SIZE_32> can1;
     static FlexCAN_T4<CAN2, RX_SIZE_256, TX_SIZE_32> can2;
-    static MotorFeedback feedback[TOTAL_MOTORS];
+    static MotorFeedback feedback[MAX_MOTORS];
 
     void initActuator(uint8_t id) {
         // Clear faults
@@ -152,7 +155,7 @@ private:
 
         // In 0x20001FD, bits 23-8 contain the motor ID (0x0001)
         uint8_t id = (msg.id >> 8) & 0xFF;
-        if (id < 1 || id > TOTAL_MOTORS) return;
+        if (id < 1 || id > ACTIVE_MOTORS) return;
 
         auto &fb = feedback[id - 1];
         fb.position = unpack((msg.buf[0] << 8) | msg.buf[1], P_MIN, P_MAX);
@@ -165,4 +168,4 @@ private:
 
 inline FlexCAN_T4<CAN1, RX_SIZE_256, TX_SIZE_32> RobStrideCan::can1;
 inline FlexCAN_T4<CAN2, RX_SIZE_256, TX_SIZE_32> RobStrideCan::can2;
-inline MotorFeedback RobStrideCan::feedback[RobStrideCan::TOTAL_MOTORS];
+inline MotorFeedback RobStrideCan::feedback[RobStrideCan::MAX_MOTORS];

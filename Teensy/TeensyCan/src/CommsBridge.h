@@ -9,15 +9,15 @@ constexpr uint32_t TELEM_SYNC_HEADER = 0x55AA55AA;
 // Host (PC/Jetson) -> Teensy (50 Hz action policy)
 struct __attribute__((packed)) PolicyCommand {
   uint32_t header = CMD_SYNC_HEADER;
-  float target_positions[RobStrideCan::TOTAL_MOTORS];   // Desired joint angles (rad)
+  float target_positions[RobStrideCan::MAX_MOTORS];   // Desired joint angles (rad)
 };
 
 // Teensy -> Host (PC/Jetson) (50 Hz observation buffer)
 struct __attribute__((packed)) ObservationTelemetry {
   uint32_t header = TELEM_SYNC_HEADER;
-  float positions[RobStrideCan::TOTAL_MOTORS];          // Measured joint angles (rad)
-  float velocities[RobStrideCan::TOTAL_MOTORS];         // Measured joint speeds (rad/s)
-  float torques[RobStrideCan::TOTAL_MOTORS];            // Measured joint torques (Nm)
+  float positions[RobStrideCan::MAX_MOTORS];          // Measured joint angles (rad)
+  float velocities[RobStrideCan::MAX_MOTORS];         // Measured joint speeds (rad/s)
+  float torques[RobStrideCan::MAX_MOTORS];            // Measured joint torques (Nm)
   uint8_t is_healthy;                                   // 1 = all motors responsive, 0 = timeout
 };
 
@@ -65,7 +65,7 @@ public:
   void sendTelemetry(const RobStrideCan &robot) {
     telem.is_healthy = robot.isHealthy() ? 1 : 0;
 
-    for (uint8_t i = 0; i < RobStrideCan::TOTAL_MOTORS; i++) {
+    for (uint8_t i = 0; i < RobStrideCan::MAX_MOTORS; i++) {
       const auto &fb = robot.getFeedback(i + 1);
       telem.positions[i]   = fb.position;
       telem.velocities[i]  = fb.velocity;
